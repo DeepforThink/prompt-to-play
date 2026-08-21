@@ -8,6 +8,8 @@ The floating mechanical city in `prompt_to_play/examples/` is only one acceptanc
 
 - A versioned, engine-independent `WorldSpec`, `PatchSpec`, evaluation policy, and validator.
 - A reusable Godot 4.7 C# scaffold that builds regions, roads, buildings, props, lights, fixed cameras, generic interactables, objectives, and a reachable exit from data.
+- A desktop launcher where the player enters an arbitrary prompt and optional reference images, then watches Plan -> Validate -> Publish -> Build -> Play run off the UI thread.
+- A structured planner with two interchangeable backends: an OpenAI-compatible API or the user's existing Codex CLI login (the zero-key default on this Windows setup).
 - Deterministic primitive fallbacks for unknown logical prefab IDs, so unfamiliar prompts remain playable without paid assets.
 - WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
 - Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
@@ -28,6 +30,36 @@ The request hash and seed are derived internally. Evaluation weights, thresholds
 ## Quick start
 
 Prerequisites are Python 3.11+, the .NET 8 SDK, and the .NET build of Godot 4.7.x.
+
+### Enter a prompt and play
+
+On Windows, the shortest complete path is:
+
+```powershell
+python -m prompt_to_play.pipeline
+```
+
+Enter any world description, optionally add reference images, and choose
+`生成并启动`. The launcher performs structured planning, contract validation,
+publishing, .NET compilation, a headless Godot structural check, and only then
+opens the playable game. Every run gets its own project under
+`../output/generated/<request-hash>/run-<id>/`, so regenerating the same prompt
+cannot overwrite a game that is still open. The example worlds are never used
+as runtime fallbacks.
+
+The default provider mode is `auto`: use `OPENAI_API_KEY` (or
+`PROMPT_TO_PLAY_API_KEY`) when present, otherwise reuse a signed-in `codex` CLI.
+Set `PROMPT_TO_PLAY_PROVIDER=openai` or `codex` to force a backend. The Codex
+backend attaches every selected image to the planning request; the generic HTTP
+adapter requires textual image summaries rather than pretending it inspected
+image bytes.
+
+Player controls are WASD + mouse, Space to jump, and E to interact. Seed, time,
+Token use, thresholds, and correction limits are not fields in this launcher:
+the seed is derived internally, while time and Token use remain evaluation
+outputs.
+
+### Publish for a host Agent
 
 Publish a Codex-ready Godot project:
 
@@ -82,6 +114,10 @@ CPU-only execution is sufficient for contract validation, compilation, headless 
 - `prompts/prompt-to-play.md` — Agent runtime protocol and stopping rules.
 - `prompt_to_play/contracts.py` — validation, canonical hashes, policy scoring, and safe patch application.
 - `prompt_to_play/lifecycle.py` — canonical request creation and deterministic best-revision selection.
+- `prompt_to_play/provider.py` — Codex CLI and OpenAI-compatible structured-output adapters.
+- `prompt_to_play/planner.py` — arbitrary prompt/reference planning into a validated WorldSpec.
+- `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.
+- `prompt_to_play/pipeline.py` — concrete planning, publishing, build, structural-check, and launch stages.
 - `prompt_to_play/evaluation_policy.json` — internal evaluation configuration.
 - `prompt_to_play/godot_template/` — reusable data-driven Godot project.
 - `engines/godot.md` — Godot generation, verification, and capture guidance.
