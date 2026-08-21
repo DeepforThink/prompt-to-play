@@ -1,0 +1,23 @@
+{
+  "schema": "prompt-to-play/evaluation-policy@1",
+  "max_correction_iterations": 2,
+  "required_checks": [
+    "scene_loads",
+    "world_graph_connected",
+    "objectives_completable",
+    "completion_reachable"
+  ],
+  "weights": {
+    "scene_similarity": 0.25,
+    "structural_correctness": 0.2,
+    "automation_loop": 0.2,
+    "generation_speed": 0.1,
+    "token_efficiency": 0.1,
+    "reproducibility": 0.15
+  },
+  "min_score": 0.8,
+  "normalization": {
+    "reference_generation_ms": 60000,
+    "reference_total_tokens": 6000
+  }
+}

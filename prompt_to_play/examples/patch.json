@@ -1,0 +1,38 @@
+{
+  "schema": "prompt-to-play/patch@1",
+  "patch_id": "patch-001",
+  "base_world_id": "floating_mechanical_city",
+  "base_world_sha256": "ba7e79c5f2580ebfe572f72aa83e92f4198d0ef5d2d1d2418bbbf3899911037c",
+  "iteration": 1,
+  "reasons": [
+    "core_c 不在导航可达区域",
+    "overview 摄像机被塔楼遮挡"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "target": {
+        "kind": "interactable",
+        "id": "core_c"
+      },
+      "changes": {
+        "position": [65, 3, 7]
+      }
+    },
+    {
+      "op": "update",
+      "target": {
+        "kind": "camera",
+        "id": "overview"
+      },
+      "changes": {
+        "position": [25, 62, 82],
+        "look_at": [35, 3, 5]
+      }
+    }
+  ],
+  "expected_checks": [
+    "cores_reachable",
+    "camera_unoccluded"
+  ]
+}

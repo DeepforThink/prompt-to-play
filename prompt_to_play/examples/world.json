@@ -1,0 +1,173 @@
+{
+  "schema": "prompt-to-play/world@1",
+  "world_id": "floating_mechanical_city",
+  "seed": 544274432,
+  "brief": {
+    "text": "一个漂浮在云海中的废弃机械城，隐藏三块能量核心",
+    "references": []
+  },
+  "style": {
+    "theme": "废弃柴油朋克空中城",
+    "palette": {
+      "sky": "#9DB7C9",
+      "ground": "#3B4145",
+      "primary": "#8B6A42",
+      "accent": "#D48A35",
+      "emissive": "#65E6FF"
+    },
+    "fog_density": 0.18
+  },
+  "units": {
+    "length": "m",
+    "rotation": "deg",
+    "up_axis": "Y"
+  },
+  "regions": [
+    {
+      "id": "foundry",
+      "kind": "industrial",
+      "center": [0, 0, 0],
+      "size": [28, 8, 28],
+      "elevation": 0
+    },
+    {
+      "id": "tower",
+      "kind": "landmark",
+      "center": [36, 6, 0],
+      "size": [20, 18, 20],
+      "elevation": 6
+    },
+    {
+      "id": "dock",
+      "kind": "exit",
+      "center": [70, 2, 10],
+      "size": [24, 8, 24],
+      "elevation": 2
+    }
+  ],
+  "roads": [
+    {
+      "id": "bridge_foundry_tower",
+      "from": "foundry",
+      "to": "tower",
+      "kind": "bridge",
+      "width": 4,
+      "waypoints": [[12, 1, 0], [24, 4, 0], [30, 6, 0]]
+    },
+    {
+      "id": "bridge_tower_dock",
+      "from": "tower",
+      "to": "dock",
+      "kind": "bridge",
+      "width": 4,
+      "waypoints": [[46, 6, 2], [58, 4, 6], [64, 2, 9]]
+    }
+  ],
+  "buildings": [
+    {
+      "id": "factory_a",
+      "region": "foundry",
+      "prefab": "building/factory_a",
+      "position": [-5, 0, -4],
+      "rotation_deg": [0, 25, 0],
+      "scale": [1, 1, 1]
+    }
+  ],
+  "props": [
+    {
+      "id": "pipe_cluster",
+      "region": "foundry",
+      "prefab": "prop/pipe_cluster",
+      "position": [6, 0, -5],
+      "rotation_deg": [0, 90, 0],
+      "scale": [1, 1, 1]
+    },
+    {
+      "id": "rusted_crates",
+      "region": "dock",
+      "prefab": "prop/rusted_crates",
+      "position": [72, 2, 2],
+      "rotation_deg": [0, -15, 0],
+      "scale": [1, 1, 1]
+    }
+  ],
+  "lights": [
+    {
+      "id": "cloud_sun",
+      "kind": "directional",
+      "position": [0, 50, 0],
+      "rotation_deg": [-45, -30, 0],
+      "color": "#D9E7FF",
+      "energy": 1.4,
+      "range": 0
+    },
+    {
+      "id": "tower_glow",
+      "kind": "omni",
+      "position": [36, 10, 0],
+      "rotation_deg": [0, 0, 0],
+      "color": "#65E6FF",
+      "energy": 4,
+      "range": 18
+    }
+  ],
+  "interactions": {
+    "player_spawn": {
+      "region": "foundry",
+      "position": [0, 1, 8]
+    },
+    "interactables": [
+      {
+        "id": "core_a",
+        "region": "foundry",
+        "prefab": "interaction/energy_core",
+        "position": [-8, 1, -6],
+        "action": "collect",
+        "label": "收集铸造区能量核心",
+        "duration_ms": 500
+      },
+      {
+        "id": "core_b",
+        "region": "tower",
+        "prefab": "interaction/energy_core",
+        "position": [36, 8, 0],
+        "action": "collect",
+        "label": "收集塔楼能量核心",
+        "duration_ms": 500
+      },
+      {
+        "id": "core_c",
+        "region": "dock",
+        "prefab": "interaction/energy_core",
+        "position": [68, 3, 4],
+        "action": "collect",
+        "label": "收集码头能量核心",
+        "duration_ms": 500
+      }
+    ],
+    "objectives": [
+      {
+        "id": "restore_power",
+        "rule": "all",
+        "targets": ["core_a", "core_b", "core_c"],
+        "completion_text": "三块核心已回收，撤离门获得供能"
+      }
+    ],
+    "exit": {
+      "id": "exit_gate",
+      "region": "dock",
+      "position": [78, 3, 10],
+      "requires": ["restore_power"]
+    }
+  },
+  "cameras": [
+    {
+      "id": "overview",
+      "kind": "fixed",
+      "position": [35, 55, 70],
+      "look_at": [35, 2, 2],
+      "fov_deg": 60,
+      "resolution": [1280, 720]
+    }
+  ]
+}

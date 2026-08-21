@@ -1,73 +1,93 @@
-# Godogen
+# Prompt-to-Play on Godogen
 
-Autonomous game development for Godot, Bevy, and Babylon.js with Claude Code and Codex.
+This fork adds a spec-driven Godot workflow to [Godogen](https://github.com/htdt/godogen): a user gives a natural-language world description and optional reference images, an Agent plans a validated world, and the same deterministic compiler turns different plans into explorable 3D scenes with lightweight objectives.
 
-[![Watch the video](https://img.youtube.com/vi/eUz19GROIpY/maxresdefault.jpg)](https://youtu.be/eUz19GROIpY)
+The floating mechanical city in `prompt_to_play/examples/` is only one acceptance fixture. It is not embedded in the compiler. A second foggy-forest fixture exercises the same generation and interaction code with a different theme, topology, entity set, and objective graph.
 
-[Watch the demos](https://youtu.be/eUz19GROIpY) · [Prompts](docs/demo_prompts.md)
+## What is implemented
 
-Describe a game. The agent builds it, generates assets, runs the engine, and proves the result — as a live game you watch and steer, or as a recorded video when you're not there. It reads the situation and decides which, in the run.
+- A versioned, engine-independent `WorldSpec`, `PatchSpec`, evaluation policy, and validator.
+- A reusable Godot 4.7 C# scaffold that builds regions, roads, buildings, props, lights, fixed cameras, generic interactables, objectives, and a reachable exit from data.
+- Deterministic primitive fallbacks for unknown logical prefab IDs, so unfamiliar prompts remain playable without paid assets.
+- WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
+- Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
+- A constrained feedback contract: stable-ID patches, exact base hashes, allowlisted fields, at most two correction rounds, and best-revision rollback.
+- A cross-platform publisher and Python CI matrix for Windows and Linux.
 
-This repo is not a game. It is the source for a generator that produces games: **godogen -> game repo -> game**. You publish into a fresh game repo — choosing engine and host-agent flavor — then the agent runs inside that repo and builds the actual game from a short engine guide.
+The host Agent performs prompt/reference interpretation and visual judgement. The repository supplies its runtime protocol, deterministic execution layer, contracts, evidence format, and correction guardrails. The scope is prompt-conditioned explorable 3D worlds, not arbitrary game genres or photorealistic reconstruction.
+
+## Public input and internal measurements
+
+The public request contains only:
+
+1. a natural-language description; and
+2. optional reference images.
+
+The request hash and seed are derived internally. Evaluation weights, thresholds, normalization references, and correction limit come from the versioned policy. Generation time, model calls, Token usage, scores, and reproducibility hashes are recorded outputs—not parameters that the user must provide.
+
+## Quick start
+
+Prerequisites are Python 3.11+, the .NET 8 SDK, and the .NET build of Godot 4.7.x.
+
+Publish a Codex-ready Godot project:
+
+```powershell
+python publish.py --engine godot --agent codex --workflow prompt-to-play --out D:\ptp-game
+Set-Location D:\ptp-game
+python prompt_to_play/lifecycle.py create-request --prompt "your world description" --output request.json
+python prompt_to_play/contracts.py validate-world spec/world.json
+dotnet build
+$env:PTP_RUN_ID = "acceptance-001"
+$env:PTP_REVISION = "0"
+godot --headless --path . --quit-after 5
+$env:PTP_CAPTURE = "1"
+godot --path . --rendering-method gl_compatibility --audio-driver Dummy
+Remove-Item Env:PTP_CAPTURE
+godot --path .
+```
+
+For Claude Code, change `--agent codex` to `--agent claude`. Re-publishing fills missing scaffold files without overwriting project scripts or `spec/world.json`; `--force` intentionally recreates a safe target from scratch.
+
+Then give the host Agent the actual world prompt and any references. Its published `AGENTS.md` or `CLAUDE.md` requires this loop:
+
+```text
+prompt + optional references
+        -> Plan and validate WorldSpec
+        -> Execute deterministic Godot compiler
+        -> Evaluate structure and fixed-camera evidence
+        -> Feedback Agent emits accept/patch/rollback/stop
+        -> Rebuild and select best revision
+```
+
+Headless execution writes the build manifest and structural report to
+`artifacts/runs/<run-id>/rev_<n>/`. Capture mode visits every WorldSpec camera,
+rejects empty or near-uniform frames, writes PNGs, and records their SHA-256
+digests in `capture_manifest.json`. Set `PTP_REVISION` to `1` or `2` only after
+a validated feedback patch; earlier evidence remains untouched.
+
+## Contracts and tests
+
+```powershell
+python prompt_to_play/contracts.py validate-world prompt_to_play/examples/world.json
+python prompt_to_play/contracts.py validate-world prompt_to_play/examples/forest_world.json
+python -m unittest discover -s tests -v
+```
+
+See [the architecture and rubric mapping](docs/PROMPT_TO_PLAY.md) for the system boundary and evaluation evidence. The six recorded metrics are scene similarity, structural correctness, automation-loop completeness, generation speed, Token efficiency, and reproducibility.
+
+CPU-only execution is sufficient for contract validation, compilation, headless structural checks, and basic compatibility rendering. A GPU is useful for faster high-quality screenshots, video, or local generative models, but it is not required for this scaffold.
 
 ## Source layout
 
-A published repo is intentionally thin: a runtime manifest, a one-page engine guide, and the asset-generation skill. The agent recreates everything else (project scaffold, capture tooling) from the guide.
+- `prompts/prompt-to-play.md` — Agent runtime protocol and stopping rules.
+- `prompt_to_play/contracts.py` — validation, canonical hashes, policy scoring, and safe patch application.
+- `prompt_to_play/lifecycle.py` — canonical request creation and deterministic best-revision selection.
+- `prompt_to_play/evaluation_policy.json` — internal evaluation configuration.
+- `prompt_to_play/godot_template/` — reusable data-driven Godot project.
+- `engines/godot.md` — Godot generation, verification, and capture guidance.
+- `publish.py` / `publish.sh` — cross-platform project publisher.
+- `tests/` — contract, generality, patch-safety, and publishing tests.
 
-- `prompts/runtime.md` — the runtime manifest
-- `asset-gen/` — the cross-engine asset-generation skill
-- `engines/babylon.md`, `engines/godot.md`, `engines/bevy.md` — per-engine guides
-- [publish.sh](publish.sh) — renders the runtime layout for the chosen engine and host agent
+## Upstream and license
 
-Engine and host agent (Claude vs Codex) are publish-time render choices, not separate source trees.
-
-## What the agent does
-
-- **Godot 4** — C#/.NET projects with build-time scene generation, runtime scripts, and Jolt physics.
-- **Bevy** — Rust/Bevy projects with code-first ECS scenes and offscreen capture.
-- **Babylon.js** — TypeScript/Vite browser games served at a live URL.
-- **Asset generation** — Gemini for precise references and characters, xAI Grok for textures and simple objects, Tripo3D for image-to-3D and rigged biped animation; animated sprites via Grok video with loop detection and background removal.
-- **Proof over claims** — the agent judges results from the running game (a live URL or a recorded clip), not from a clean compile, so visible defects drive the next iteration.
-- **You choose your involvement** — watch the live game (a Babylon.js URL, or a Godot/Bevy project you run) and steer at decision points, or leave the run unattended and get a 15–20s proof recording at the end. The agent takes its cue from how you frame the task.
-
-## Getting started
-
-### Prerequisites
-
-- [Godot 4](https://godotengine.org/download/) (.NET build) on `PATH` for Godot projects
-- Rust/Cargo for Bevy projects
-- Node.js 22.12+ and npm for Babylon.js projects
-- Chrome or Chromium with hardware WebGL2 for Babylon.js browser capture
-- Python 3 with pip
-- API keys as environment variables:
-  - `GOOGLE_API_KEY` — [Google AI Studio](https://aistudio.google.com/) for Gemini image generation
-  - `XAI_API_KEY` — [xAI Grok](https://console.x.ai/home) for image/video generation
-  - `TRIPO3D_API_KEY` — [Tripo3D](https://platform.tripo3d.ai/) for 3D generation
-- System packages from [setup.md](setup.md): `vulkan-tools`, `xvfb`, `ffmpeg`, `imagemagick`, plus platform-specific extras
-- Tested on Ubuntu, Debian, and macOS
-- Claude Code or Codex
-
-### Publish a game repo
-
-Pick the engine and host agent:
-
-```bash
-./publish.sh --engine godot   --agent claude --out ~/my-game       # CLAUDE.md + .claude/skills/
-./publish.sh --engine babylon --agent codex  --out ~/my-game       # AGENTS.md + .agents/skills/
-./publish.sh --engine bevy    --agent claude --out ~/my-game
-```
-
-Pass `--force` to wipe existing contents at the target before re-publishing.
-
-## Running on a server
-
-A full generation run can take hours, so it's convenient to offload it to a server — ideally a GPU instance, since engine rendering and video capture are much faster with hardware acceleration.
-
-- Keep the session alive across SSH drops with `tmux` or `screen`.
-- Enable remote control so you can check in and steer the run from any device — both Claude Code and Codex have official remote-control interfaces.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
-
-Follow progress: [@alex_erm](https://x.com/alex_erm)
+This work remains a fork of Godogen and preserves its multi-engine autonomous workflow. Use `--workflow autonomous` (the default) for the original thin publisher behavior. See [LICENSE.md](LICENSE.md) and the upstream project for attribution and licensing details.

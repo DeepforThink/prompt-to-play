@@ -1,0 +1,80 @@
+{
+  "schema": "prompt-to-play/evaluation@1",
+  "run_id": "20260821T013000Z",
+  "world_id": "floating_mechanical_city",
+  "world_sha256": "a6270182ff2be0ebe66061204ba7ce4759abb4387d1dd3741c970d934ef66c75",
+  "iteration": 1,
+  "status": "pass",
+  "started_at_utc": "2026-08-21T01:30:00Z",
+  "finished_at_utc": "2026-08-21T01:30:51Z",
+  "timing_ms": {
+    "plan": 8200,
+    "build": 22100,
+    "import": 5400,
+    "capture": 10800,
+    "evaluate": 4200,
+    "total": 50700
+  },
+  "tokens": {
+    "model": "planner-model",
+    "calls": 2,
+    "input": 4320,
+    "cached_input": 1200,
+    "output": 1010,
+    "total": 5330
+  },
+  "checks": [
+    {
+      "id": "scene_loads",
+      "kind": "hard",
+      "passed": true,
+      "score": 1,
+      "message": "Godot scene loaded without errors",
+      "evidence": ["runs/20260821T013000Z/logs/godot.log"]
+    },
+    {
+      "id": "world_graph_connected",
+      "kind": "hard",
+      "passed": true,
+      "score": 1,
+      "message": "All required regions are connected by traversable roads",
+      "evidence": ["runs/20260821T013000Z/logs/build.log"]
+    },
+    {
+      "id": "objectives_completable",
+      "kind": "hard",
+      "passed": true,
+      "score": 1,
+      "message": "Every objective target exists and has a valid navigation path",
+      "evidence": ["runs/20260821T013000Z/screenshots/core-route.png"]
+    },
+    {
+      "id": "completion_reachable",
+      "kind": "hard",
+      "passed": true,
+      "score": 1,
+      "message": "The exit becomes reachable after its required objective completes",
+      "evidence": ["runs/20260821T013000Z/video.mp4"]
+    }
+  ],
+  "metrics": {
+    "scene_similarity": 0.76,
+    "structural_correctness": 1,
+    "automation_loop": 1,
+    "generation_speed": 1,
+    "token_efficiency": 1,
+    "reproducibility": 1
+  },
+  "result": {
+    "weighted_score": 0.94,
+    "threshold": 0.8,
+    "passed": true
+  },
+  "issues": [],
+  "artifacts": {
+    "scene": "scenes/generated_world.tscn",
+    "screenshots": ["runs/20260821T013000Z/screenshots/overview.png"],
+    "video": "runs/20260821T013000Z/video.mp4"
+  },
+  "next_action": "accept"
+}
