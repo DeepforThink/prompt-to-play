@@ -29,10 +29,10 @@ class Stage(str, Enum):
 
 STAGE_LABELS: Mapping[Stage, str] = MappingProxyType(
     {
-        Stage.PLAN: "规划",
-        Stage.VALIDATE: "校验",
-        Stage.PUBLISH: "发布",
-        Stage.BUILD: "构建",
+        Stage.PLAN: "生成",
+        Stage.VALIDATE: "安全校验",
+        Stage.PUBLISH: "项目落盘",
+        Stage.BUILD: "构建、试玩探针与闭环评测",
         Stage.LAUNCH: "启动",
     }
 )
@@ -59,7 +59,7 @@ class LaunchRequest:
     ) -> "LaunchRequest":
         normalized_prompt = prompt.strip()
         if not normalized_prompt:
-            raise ValueError("请输入游戏世界描述。")
+            raise ValueError("请输入你想生成的游戏描述。")
 
         normalized_images: list[Path] = []
         seen: set[str] = set()
@@ -120,7 +120,7 @@ class PipelineCommands:
     def unconfigured(cls) -> "PipelineCommands":
         def missing_adapter(_state: PipelineState, _log: LogSink) -> None:
             raise PipelineConfigurationError(
-                "尚未注入 Prompt-to-Play 流水线命令；请由 planner/provider 入口调用 "
+                "尚未注入 Prompt-to-Play 流水线命令；请由 generator/provider 入口调用 "
                 "run_launcher(PipelineCommands(...))。"
             )
 
@@ -300,7 +300,7 @@ class LauncherApp:
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(6, weight=1)
 
-        self._ttk.Label(frame, text="描述你想生成的游戏世界").grid(
+        self._ttk.Label(frame, text="描述你想生成的游戏（玩法、画面、规则）").grid(
             row=0, column=0, sticky="w"
         )
         self.prompt_text = self._tk.Text(frame, height=7, wrap="word")
@@ -386,7 +386,7 @@ class LauncherApp:
         self._clear_log()
         self._set_running_controls(True)
         self._status.set("准备运行")
-        self._append_log("已提交生成请求。")
+        self._append_log("已提交生成请求；未达到质量门槛时会自动评测并修复。")
 
     def _poll_events(self) -> None:
         for event in self.controller.drain_events():
@@ -397,7 +397,7 @@ class LauncherApp:
         if self.controller.running:
             self._messagebox.showwarning(
                 "任务正在运行",
-                "规划或构建尚未完成，请等待流水线结束后再关闭窗口。",
+                "生成或构建尚未完成，请等待流水线结束后再关闭窗口。",
                 parent=self.root,
             )
             return

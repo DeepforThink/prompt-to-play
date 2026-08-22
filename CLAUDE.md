@@ -1,1 +1,1 @@
-AGENTS.md
+docs/PROMPT_TO_PLAY.md

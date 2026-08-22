@@ -7,6 +7,8 @@ one vendor or model:
 ``PROMPT_TO_PLAY_MODEL`` (or ``OPENAI_MODEL``)
 ``PROMPT_TO_PLAY_BASE_URL`` (or ``OPENAI_BASE_URL``)
 ``PROMPT_TO_PLAY_API_STYLE`` (``chat_completions`` or ``responses``)
+``PROMPT_TO_PLAY_STRUCTURED_OUTPUT_MODE`` (``native`` or ``prompt``)
+``PROMPT_TO_PLAY_STREAM_RESPONSES`` (boolean; useful for long generations)
 ``PROMPT_TO_PLAY_USER_AGENT`` (optional compatibility header for API gateways)
 ``PROMPT_TO_PLAY_TIMEOUT_SECONDS`` and ``PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS``
 
@@ -20,10 +22,13 @@ and ``PROMPT_TO_PLAY_REPO`` override the CLI executable and read-only workspace.
 from __future__ import annotations
 
 import base64
+import http.client as http_client
 import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -35,6 +40,7 @@ from urllib import error, parse, request
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5-mini"
 API_STYLES = ("chat_completions", "responses")
+STRUCTURED_OUTPUT_MODES = ("native", "prompt")
 PROVIDER_MODES = ("auto", "http", "openai", "codex")
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 IMAGE_MIME_TYPES = {
@@ -67,6 +73,44 @@ class ProviderResponseError(ProviderError):
     """Raised when the endpoint returns a malformed structured response."""
 
 
+_SAFE_HTTP_ERROR_HINTS = (
+    "temperature",
+    "max_output_tokens",
+    "response_format",
+    "text.format",
+    "json_schema",
+    "additionalproperties",
+    "anyof",
+    "maxlength",
+    "minlength",
+    "maxitems",
+    "minitems",
+    "required",
+    "const",
+    "instructions",
+    "input",
+    "model",
+)
+_SAFE_HTTP_ERROR_CATEGORIES = {
+    "authentication_error": "authentication failed",
+    "invalid_api_key": "authentication failed",
+    "unauthorized": "authentication failed",
+    "permission_denied": "permission denied",
+    "forbidden": "permission denied",
+    "invalid_request": "invalid request",
+    "invalid_request_error": "invalid request",
+    "bad_request": "invalid request",
+    "model_not_found": "model unavailable",
+    "invalid_model": "model unavailable",
+    "model_not_available": "model unavailable",
+    "rate_limit_exceeded": "rate or quota limited",
+    "insufficient_quota": "rate or quota limited",
+    "quota_exceeded": "rate or quota limited",
+    "server_error": "upstream failure",
+    "upstream_error": "upstream failure",
+}
+
+
 Transport = Callable[[str, Mapping[str, str], bytes, float], bytes]
 
 
@@ -90,12 +134,25 @@ def _positive_integer(value: str, name: str) -> int:
     return number
 
 
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ProviderConfigurationError(
+        f"{name} must be one of true/false, yes/no, on/off, or 1/0"
+    )
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     api_key: str = field(repr=False)
     model: str
     base_url: str = DEFAULT_BASE_URL
     api_style: str = "chat_completions"
+    structured_output_mode: str = "native"
+    stream_responses: bool = False
     timeout_seconds: float = 120.0
     max_output_tokens: int = 12000
     user_agent: str | None = None
@@ -107,10 +164,11 @@ class ProviderConfig:
             env.get("PROMPT_TO_PLAY_API_KEY") or env.get("OPENAI_API_KEY") or ""
         )
         if any(
-            ord(character) < 32 or ord(character) == 127
-            for character in raw_api_key
+            ord(character) < 32 or ord(character) == 127 for character in raw_api_key
         ):
-            raise ProviderConfigurationError("API key must not contain control characters")
+            raise ProviderConfigurationError(
+                "API key must not contain control characters"
+            )
         api_key = raw_api_key.strip()
         if not api_key:
             raise ProviderConfigurationError(
@@ -165,6 +223,21 @@ class ProviderConfig:
             raise ProviderConfigurationError(
                 "PROMPT_TO_PLAY_API_STYLE must be 'chat_completions' or 'responses'"
             )
+        structured_output_mode = env.get(
+            "PROMPT_TO_PLAY_STRUCTURED_OUTPUT_MODE", "native"
+        ).strip()
+        if structured_output_mode not in STRUCTURED_OUTPUT_MODES:
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_STRUCTURED_OUTPUT_MODE must be 'native' or 'prompt'"
+            )
+        stream_responses = _boolean(
+            env.get("PROMPT_TO_PLAY_STREAM_RESPONSES", "false"),
+            "PROMPT_TO_PLAY_STREAM_RESPONSES",
+        )
+        if stream_responses and api_style != "responses":
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_STREAM_RESPONSES requires API style 'responses'"
+            )
         timeout = _positive_number(
             env.get("PROMPT_TO_PLAY_TIMEOUT_SECONDS", "120"),
             "PROMPT_TO_PLAY_TIMEOUT_SECONDS",
@@ -175,8 +248,7 @@ class ProviderConfig:
         )
         user_agent = env.get("PROMPT_TO_PLAY_USER_AGENT", "").strip()
         if any(
-            ord(character) < 32 or ord(character) == 127
-            for character in user_agent
+            ord(character) < 32 or ord(character) == 127 for character in user_agent
         ):
             raise ProviderConfigurationError(
                 "PROMPT_TO_PLAY_USER_AGENT must not contain control characters"
@@ -186,6 +258,8 @@ class ProviderConfig:
             model=model,
             base_url=base_url.rstrip("/"),
             api_style=api_style,
+            structured_output_mode=structured_output_mode,
+            stream_responses=stream_responses,
             timeout_seconds=timeout,
             max_output_tokens=max_output_tokens,
             user_agent=user_agent or None,
@@ -241,15 +315,18 @@ def _default_transport(
             return response.read()
     except error.HTTPError as exc:
         # Compatible endpoints sometimes echo request headers or submitted
-        # content in error bodies. Never propagate that untrusted body into UI
-        # logs or Agent traces, where credentials or prompts could leak.
-        raise ProviderRequestError(f"provider HTTP {exc.code}") from exc
+        # content in error bodies. Extract only small, allow-listed identifiers;
+        # never propagate a remote message, credential, or prompt into UI logs.
+        detail = _safe_http_error_detail(exc)
+        raise ProviderRequestError(f"provider HTTP {exc.code}{detail}") from None
     except error.URLError as exc:
-        raise ProviderRequestError(f"provider request failed: {exc.reason}") from exc
-    except OSError as exc:
-        raise ProviderRequestError(f"provider request failed: {exc}") from exc
-    except (TypeError, ValueError) as exc:
-        raise ProviderRequestError("provider request configuration is invalid") from exc
+        raise ProviderRequestError(_safe_transport_failure(exc.reason)) from None
+    except (OSError, http_client.HTTPException) as exc:
+        raise ProviderRequestError(_safe_transport_failure(exc)) from None
+    except (TypeError, ValueError):
+        raise ProviderRequestError(
+            "provider request configuration is invalid"
+        ) from None
 
 
 class _NoRedirectHandler(request.HTTPRedirectHandler):
@@ -267,6 +344,78 @@ class _NoRedirectHandler(request.HTTPRedirectHandler):
         return None
 
 
+def _safe_http_error_detail(exc: error.HTTPError) -> str:
+    """Return non-sensitive machine fields from a provider JSON error body."""
+
+    try:
+        raw = exc.read(16 * 1024 + 1)
+    except (OSError, ValueError, AttributeError):
+        raw = b""
+    finally:
+        try:
+            exc.close()
+        except (OSError, AttributeError):
+            pass
+    if not isinstance(raw, bytes) or not raw or len(raw) > 16 * 1024:
+        return ""
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(document, Mapping):
+        return ""
+    candidate = document.get("error", document)
+    if not isinstance(candidate, Mapping):
+        return ""
+
+    parts: list[str] = []
+    for key in ("type", "code"):
+        value = candidate.get(key)
+        category = (
+            _SAFE_HTTP_ERROR_CATEGORIES.get(value.strip().casefold())
+            if isinstance(value, str)
+            else None
+        )
+        if category and category not in parts:
+            parts.append(category)
+
+    message = candidate.get("message")
+    diagnostic_text = message if isinstance(message, str) else ""
+    param = candidate.get("param")
+    if isinstance(param, str):
+        diagnostic_text += " " + param
+    folded = diagnostic_text.casefold()
+    hints = [hint for hint in _SAFE_HTTP_ERROR_HINTS if hint in folded]
+    if hints:
+        parts.append("fields=" + ",".join(dict.fromkeys(hints)))
+    return " (" + "; ".join(parts) + ")" if parts else ""
+
+
+def _safe_transport_failure(exc: Any) -> str:
+    """Map exception classes to useful diagnostics without remote text."""
+
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "provider request timed out"
+    if isinstance(exc, ssl.SSLError):
+        return "provider TLS connection failed"
+    if isinstance(exc, socket.gaierror):
+        return "provider DNS lookup failed"
+    if isinstance(exc, ConnectionRefusedError):
+        return "provider connection was refused"
+    if isinstance(
+        exc,
+        (
+            ConnectionAbortedError,
+            ConnectionResetError,
+            BrokenPipeError,
+            http_client.RemoteDisconnected,
+            http_client.IncompleteRead,
+        ),
+    ):
+        return "provider connection closed before completion"
+    return "provider request failed"
+
+
 def _message_text(content: Any) -> str | None:
     if isinstance(content, str):
         return content
@@ -282,6 +431,73 @@ def _message_text(content: Any) -> str | None:
         elif isinstance(text, dict) and isinstance(text.get("value"), str):
             parts.append(text["value"])
     return "".join(parts) if parts else None
+
+
+def _decode_provider_response(raw: bytes, *, streamed: bool) -> dict[str, Any]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProviderResponseError(
+            "provider response is not valid UTF-8 JSON or event stream"
+        ) from exc
+
+    if not streamed or text.lstrip().startswith("{"):
+        try:
+            response = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ProviderResponseError(
+                "provider response is not valid UTF-8 JSON"
+            ) from exc
+        if not isinstance(response, dict):
+            raise ProviderResponseError("provider response must be a JSON object")
+        return response
+
+    final_response: dict[str, Any] | None = None
+    output_deltas: list[str] = []
+    for block in re.split(r"\r?\n\r?\n", text):
+        event_name = ""
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if not data_lines:
+            continue
+        data = "\n".join(data_lines)
+        if data.strip() == "[DONE]":
+            continue
+        try:
+            event_document = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ProviderResponseError(
+                "provider event stream contains invalid JSON"
+            ) from exc
+        if not isinstance(event_document, Mapping):
+            continue
+        event_type = event_document.get("type", event_name)
+        if event_type == "response.output_text.delta":
+            delta = event_document.get("delta")
+            if isinstance(delta, str):
+                output_deltas.append(delta)
+        elif event_type == "response.completed":
+            candidate = event_document.get("response")
+            if isinstance(candidate, Mapping):
+                final_response = dict(candidate)
+        elif event_type in {
+            "error",
+            "response.failed",
+            "response.incomplete",
+        }:
+            raise ProviderResponseError("provider streaming response did not complete")
+
+    if final_response is not None:
+        if output_deltas and not isinstance(final_response.get("output_text"), str):
+            final_response["output_text"] = "".join(output_deltas)
+        return final_response
+    if output_deltas:
+        return {"output_text": "".join(output_deltas)}
+    raise ProviderResponseError("provider event stream has no completed response")
 
 
 class OpenAICompatibleProvider:
@@ -374,6 +590,10 @@ class OpenAICompatibleProvider:
         image_data_urls: Sequence[str] = (),
     ) -> dict[str, Any]:
         request_messages = self._messages_with_images(messages, image_data_urls)
+        if self.config.structured_output_mode == "prompt":
+            return self._prompt_structured_payload(
+                request_messages, json_schema, schema_name
+            )
         if self.config.api_style == "chat_completions":
             return {
                 "model": self.config.model,
@@ -389,7 +609,7 @@ class OpenAICompatibleProvider:
                     },
                 },
             }
-        return {
+        payload = {
             "model": self.config.model,
             "input": request_messages,
             "temperature": 0,
@@ -402,6 +622,72 @@ class OpenAICompatibleProvider:
                     "schema": json_schema,
                 }
             },
+        }
+        if self.config.stream_responses:
+            payload["stream"] = True
+        return payload
+
+    def _prompt_structured_payload(
+        self,
+        request_messages: Sequence[Mapping[str, Any]],
+        json_schema: Mapping[str, Any],
+        schema_name: str,
+    ) -> dict[str, Any]:
+        """Build a minimal JSON request for gateways without native schemas.
+
+        The endpoint is asked for plain JSON, then the same local parser and
+        domain validators used by native Structured Outputs enforce the result.
+        """
+
+        compact_schema = json.dumps(
+            json_schema, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
+        schema_instruction = (
+            "Return exactly one JSON object and no Markdown or commentary. "
+            f"It must validate against JSON Schema {schema_name!r}:\n{compact_schema}"
+        )
+        system_parts: list[str] = []
+        input_messages: list[dict[str, Any]] = []
+        for message in request_messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "system" and isinstance(content, str):
+                system_parts.append(content)
+            else:
+                input_messages.append(dict(message))
+        system_parts.append(schema_instruction)
+
+        if (
+            self.config.api_style == "responses"
+            and len(input_messages) == 1
+            and input_messages[0].get("role") == "user"
+            and isinstance(input_messages[0].get("content"), str)
+        ):
+            response_input: Any = input_messages[0]["content"]
+        else:
+            response_input = input_messages
+
+        if self.config.api_style == "responses":
+            payload = {
+                "model": self.config.model,
+                "instructions": "\n\n".join(system_parts),
+                "input": response_input,
+                "max_output_tokens": self.config.max_output_tokens,
+                "store": False,
+            }
+            if self.config.stream_responses:
+                payload["stream"] = True
+            return payload
+
+        chat_messages = [
+            {"role": "system", "content": "\n\n".join(system_parts)},
+            *input_messages,
+        ]
+        return {
+            "model": self.config.model,
+            "messages": chat_messages,
+            "temperature": 0,
+            "max_tokens": self.config.max_output_tokens,
         }
 
     def _messages_with_images(
@@ -549,7 +835,11 @@ class OpenAICompatibleProvider:
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": (
+                "text/event-stream"
+                if self.config.stream_responses
+                else "application/json"
+            ),
         }
         if self.config.user_agent:
             headers["User-Agent"] = self.config.user_agent
@@ -558,14 +848,7 @@ class OpenAICompatibleProvider:
         )
         if not isinstance(raw, bytes):
             raise ProviderResponseError("provider transport must return bytes")
-        try:
-            response = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProviderResponseError(
-                "provider response is not valid UTF-8 JSON"
-            ) from exc
-        if not isinstance(response, dict):
-            raise ProviderResponseError("provider response must be a JSON object")
+        response = _decode_provider_response(raw, streamed=self.config.stream_responses)
         document = self._extract_structured(response, self.config.api_style)
         self._record_usage(response)
         return document
@@ -729,9 +1012,7 @@ class CodexCliProvider:
             stderr or "",
         )
         model = model_match.group(1) if model_match else "codex-cli"
-        total = (
-            int(token_match.group(1).replace(",", "")) if token_match else 0
-        )
+        total = int(token_match.group(1).replace(",", "")) if token_match else 0
         # Codex CLI exposes a combined total in human-readable diagnostics, not
         # a stable input/output split. Preserve that measured total without
         # inventing additional tokens; ``exact`` remains false for this reason.
@@ -837,8 +1118,8 @@ class CodexCliProvider:
             temp = Path(temporary)
             workspace = temp / "workspace"
             workspace.mkdir()
-            output_path = temp / "world.json"
-            schema_path = temp / "world-schema.json"
+            output_path = temp / "structured-output.json"
+            schema_path = temp / "output-schema.json"
             try:
                 schema_path.write_text(
                     json.dumps(json_schema, ensure_ascii=False, allow_nan=False),

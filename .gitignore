@@ -4,5 +4,12 @@
 .playwright-cli/
 .playwright
 **/__pycache__
+.pytest_cache/
+.ruff_cache/
+**/.godot/
+**/artifacts/
+**/bin/
+**/obj/
+output/
 godot/skills/godot-api/doc_api/
 godot/skills/godot-api/doc_source/

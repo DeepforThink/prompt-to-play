@@ -1,168 +1,253 @@
 # Godot engine guide
 
-Stack: **Godot 4 (.NET / Mono build)**, **C#**. All Godot C# classes must be `partial`.
+Stack: **Godot 4.7.1 .NET**, **.NET 8**, and prompt-specific **C# and/or
+GDScript**. Every Godot C# class must be declared `partial`.
 
-## Project shape
+## Trusted host and generated source
 
-- `project.godot` — config, input actions, display, physics. **Match version-sensitive fields to the installed toolchain** (`config_version`, and in `.csproj` the `Godot.NET.Sdk/...` version + `TargetFramework`) — run `godot --version` / `dotnet --version` and don't hardcode values from memory; on an existing project preserve them. For 3D, set `3d/physics_engine="Jolt Physics"` and a fixed `physics_ticks_per_second`.
-- `{ProjectName}.csproj` — name must match `assembly_name`; `<EnableDynamicLoading>true</EnableDynamicLoading>`.
-- `scripts/*.cs` runtime behavior · `scenes/*.tscn` scenes · `assets/` **only** files the running game loads (keep generation inputs/refs outside it).
-- Build gate: `dotnet build`, then `godot --headless --import` after asset changes, then `godot --headless --quit` (RID-leak warnings on headless exit are benign).
+The direct Prompt-to-Play project has two ownership domains.
 
-The user watches by running the project themselves (`godot --path .` or the editor) — keep it building and importing cleanly so each run reflects current state.
+Trusted repository files:
 
-## Scenes are generated at build time, not by hand
+- `project.godot` fixes the main scene, window, renderer, and physics settings;
+- `PromptToPlayDirect.csproj` pins `Godot.NET.Sdk/4.7.1`, `net8.0`, dynamic
+  loading, nullable checks, assembly name, and root namespace;
+- `harness/Main.tscn` and `harness/*.cs` load, inspect, capture, and report on
+  the generated game.
 
-The published Prompt-to-Play scaffold starts with a deterministic runtime
-compiler: `WorldRuntime.cs` validates `spec/world.json`, builds the scene tree,
-and writes a stable manifest on startup. The validated on-disk WorldSpec is the
-winning revision in this mode. If a run promotes that tree to a cached `.tscn`,
-use the packing and reload rules below; never make the cached scene a second
-semantic source of truth.
+Model-owned files live only below `generated/`. The required source of truth is
+`generated/GeneratedGame.tscn`; it may reference additional generated C#,
+GDScript, scenes, resources, and shaders. There is no `spec/world.json`,
+`WorldRuntime`, fixed entity graph, or build-time semantic compiler.
 
-Write scenes as **C# `SceneTree` scripts** that run once headless and emit a `.tscn`: `godot --headless --script scenes/BuildX.cs`. A builder builds the node hierarchy, sets properties, attaches scripts, packs, and `Quit()`s — it contains **no** runtime logic (no `_Ready`/`_Process`, signals, or game state). Build **leaf scenes first**, parents after.
+Do not edit or shadow the trusted files from generated source. Do not add NuGet
+packages. Create any prompt-specific InputMap actions synchronously in `_Ready`,
+bind intuitive keys, and drive gameplay with `Input.IsActionPressed`,
+`Input.GetAxis`, or `Input.GetVector`. Physical-key polling alone cannot be
+synthesized by the trusted interaction probe and therefore fails automation.
 
-Treat a validated `world_spec.json` as the source of truth, not the generated node tree. Every region, road, building, prop, light, interactable, objective, exit, and camera gets an immutable stable `id`; copy that ID to generated nodes as metadata and use logical asset-catalog IDs instead of machine-specific paths. Write the build manifest in stable-ID order so a rerun can be compared byte-for-byte.
+Reference images are attached to the model and copied into verified
+`references/**` project paths. Generated resources may use the supplied
+`res://references/...` paths, but a request with no references must still build
+without external texture, mesh, audio, or font files.
 
-Seed every procedural choice from the WorldSpec. Derive an independent child seed from the root seed and stable ID with SHA-256; never use C# `string.GetHashCode()` (it is not stable across processes) or consume one shared RNG whose result changes when entity order changes:
+## Generated entry contract
+
+The harness always loads:
+
+```text
+res://generated/GeneratedGame.tscn
+```
+
+That entry can have a `Node2D`, `Control`, or `Node3D` root. It must, within two
+process frames:
+
+- add at least one node to `ptp_gameplay`;
+- expose visible content (`CanvasItem` for 2D/UI or `GeometryInstance3D` for
+  3D);
+- add one or two `Camera2D`/`Camera3D` nodes to `ptp_capture_camera`; and
+- add the controlled node, goal/progression, and visible status UI to
+  `ptp_player`, `ptp_objective`, and `ptp_hud`;
+- add at least one stateful node to `ptp_interaction_probe`, set its string
+  metadata `ptp_probe_actions` to comma-separated existing InputMap action
+  names, and make those actions change its transform, velocity, Control/Range/
+  Label state, or `ptp_probe_state` metadata; and
+- make the requested mechanic playable with visible state and completion or
+  failure feedback.
+
+Set a stable string `capture_id` metadata value on each evaluation camera when
+its node name is not descriptive. Put temporary debug overlays or UI that
+should be absent from evidence in `ptp_capture_hidden`; the harness hides those
+`CanvasItem`s before capture.
+
+Create essential procedural content synchronously in `_Ready()`. The harness
+waits two frames, not an unbounded loading screen. Long initialization should
+present a valid initial game and camera before scheduling optional detail.
+
+## Direct scene authoring
+
+Prefer a small hand-authored `.tscn` entry that attaches one generated script,
+then construct repeated geometry and gameplay nodes in code. This keeps model
+output compact and avoids fragile, enormous scene text.
+
+A minimal C# entry looks like:
 
 ```csharp
-using System.Buffers.Binary;
-using System.Security.Cryptography;
-using System.Text;
+using Godot;
 
-static ulong DeriveSeed(ulong rootSeed, string stableId) {
-    byte[] bytes = Encoding.UTF8.GetBytes($"{rootSeed}:{stableId}");
-    byte[] digest = SHA256.HashData(bytes);
-    return BinaryPrimitives.ReadUInt64LittleEndian(digest);
-}
+namespace PromptToPlay.Generated;
 
-var rng = new RandomNumberGenerator { Seed = DeriveSeed(spec.Seed, entity.WorldId) };
-```
-
-The serialization rules below are silent-failure — they pass compilation and drop nodes or bloat files only in the saved `.tscn`:
-
-- **Owner chain:** every node must have `Owner` set to the scene root or it won't serialize. After building, walk the tree and set `child.Owner = root` on all descendants — but **do not recurse into instantiated GLB/`.tscn` nodes** (those have a non-empty `SceneFilePath`). Recursing into a GLB inlines all its meshes as text → 100MB+ `.tscn`.
-- **Validate pack and disk state:** compare node counts and the exact set of stable IDs after `Pack()`/`Instantiate()`, check the return value of `ResourceSaver.Save()`, then reload with the resource cache bypassed and repeat the checks. Only a verified on-disk scene is a successful build; an in-memory instance is not proof that saving worked.
-- **`SetScript()` disposes the C# wrapper** — set scripts *last*, after the hierarchy is built. For the root, add it under a temp `Node`, set the script, then re-fetch it via `temp.GetChild(0)` before packing.
-
-Sketch of the shared save path:
-
-```csharp
-void PackAndSave(Node root, string path) {
-    SetOwnerRecursive(root, root); // Skip descendants of nodes with SceneFilePath set.
-    int expectedCount = CountNodes(root);
-    var expectedIds = CollectWorldIds(root); // This helper rejects duplicate IDs.
-
-    var packed = new PackedScene();
-    if (packed.Pack(root) != Error.Ok) { Fail("Pack failed"); return; }
-
-    var memoryCopy = packed.Instantiate();
-    bool memoryOk = CountNodes(memoryCopy) == expectedCount
-        && CollectWorldIds(memoryCopy).SetEquals(expectedIds);
-    memoryCopy.Free();
-    if (!memoryOk) { Fail("PackedScene dropped or changed nodes/IDs"); return; }
-
-    Error saveError = ResourceSaver.Save(packed, path);
-    if (saveError != Error.Ok) { Fail($"Save failed: {saveError}"); return; }
-
-    var diskScene = ResourceLoader.Load<PackedScene>(
-        path, "", ResourceLoader.CacheMode.Ignore);
-    if (diskScene is null) { Fail("Saved scene could not be reloaded from disk"); return; }
-
-    var diskCopy = diskScene.Instantiate();
-    bool diskOk = CountNodes(diskCopy) == expectedCount
-        && CollectWorldIds(diskCopy).SetEquals(expectedIds);
-    diskCopy.Free();
-    if (!diskOk) { Fail("On-disk scene differs from the build"); return; }
-
-    Quit(0);
+public partial class GeneratedGame : Node3D
+{
+    public override void _Ready()
+    {
+        AddToGroup("ptp_gameplay");
+        BuildEnvironment();
+        BuildPlayerAndCamera();
+    }
 }
 ```
 
-`path` should be a revision-specific `res://...` path. `Fail(...)` must log the error and `Quit(1)`. Do not publish a build manifest until this function exits successfully; record the WorldSpec hash, root seed, stable IDs, logical asset IDs, scene path, and generated file hashes in that manifest.
+The matching scene uses a project-relative resource path:
 
-GLB models: instantiate the `PackedScene`, measure the `MeshInstance3D` AABB to scale, and use a **primitive** collision shape (Box/Sphere/Capsule) from the AABB — never `CreateTrimeshShape()`/`CreateConvexShape()` on imported meshes (drops to <1 FPS).
+```ini
+[gd_scene load_steps=2 format=3]
 
-## Quirks worth knowing (silent-failure)
+[ext_resource type="Script" path="res://generated/GeneratedGame.cs" id="1"]
 
-Most Godot behavior the model already knows; these few fail with no error:
-
-- **`ArrayMesh.GenerateNormals()`** is required for a procedural mesh to *receive* shadows. Without it (or with `CullMode.Disabled` as a "safety net"), shadows silently vanish — fix winding instead.
-- **MultiMeshInstance3D + GLB** loses the mesh on pack/save; use individual instances. `MaterialOverride` on GLB-internal nodes also won't serialize (owner is skipped) — use a procedural `ArrayMesh` when a custom material is needed.
-- **Raycasts don't reliably hit `ConcavePolygonShape3D`** (trimesh) — use a shape query or sample terrain height analytically.
-- **`.gdignore`** in a directory makes the importer skip it silently — only `screenshots/` should have one, never `assets/`.
-- **C# enum names:** training data is GDScript-biased, so guessed C# enum names are often wrong (`BGMode.Sky`, not `BGModeEnum.Sky`). Verify against the installed Godot — read the C# API in the Godot docs/assemblies rather than guessing.
-- Frame-rate-independent damping: `speed *= Mathf.Exp(-rate * delta)`, not `speed *= (1 - drag)` per tick.
-
-## Structural evaluation is a separate, read-only stage
-
-Run a dedicated C# `SceneTree` evaluator after the verified save and before any visual capture. It loads the generated scene **from disk** and writes a machine-readable report; it does not repair nodes, rewrite the WorldSpec, or reuse the builder's in-memory tree. Exit nonzero when a hard gate fails.
-
-At minimum, the evaluator owns these checks:
-
-- `scene_loads`: the scene loads without parser, script, or runtime errors, and all required stable IDs and catalog references exist exactly once;
-- `world_graph_connected`: all required regions are connected from the player spawn through declared roads;
-- `objectives_completable`: every objective references existing interactables in reachable regions and its `all`, `any`, or `sequence` rule can complete;
-- `completion_reachable`: the exit region is reachable and its required objective IDs can all become complete;
-- nodes and colliders stay inside WorldSpec bounds; required colliders exist and forbidden overlaps are absent;
-- manifest hashes, stable-ID ordering, and a second same-seed build agree, with nondeterministic fields explicitly excluded;
-- every failure has a stable issue code, severity, affected IDs, and an evidence path in `eval_report.json`.
-
-The reference scaffold proves reachability over the region/road graph and checks
-generated collision counts. A run that adds NavMesh geometry should strengthen
-the same four check IDs with synchronized navigation-path queries; it must not
-silently rename the rubric gates.
-
-Only revisions passing all structural hard gates may enter screenshot/video evaluation. This keeps rendering and vision evaluation from hiding a broken scene behind a good-looking frame.
-
-## Capture (proof video)
-
-For fixed-camera still evidence, set safe `PTP_RUN_ID`, set `PTP_REVISION` to
-`0`, `1`, or `2`, and launch the rendered project with `PTP_CAPTURE=1`. The
-scaffold visits every WorldSpec camera, waits for rendered frames, rejects empty
-or near-uniform output, saves PNGs below the revision directory, records their
-SHA-256 digests, and exits. Do not pass `--headless` for this capture run.
-
-Hardware **Vulkan** gives correct rendering and is required for video; software Vulkan (`llvmpipe`/`lavapipe`) can still do stills but skip video and report it.
-
-Capture deterministically with Godot's movie writer from a dedicated capture `SceneTree` script under `test/`:
-
-```bash
-# under xvfb-run -a -s '-screen 0 1920x1080x24' on a headless Linux box; prefer the hardware Vulkan ICD
-godot --headless --import
-godot --write-movie screenshots/result/frame.png --fixed-fps 30 --quit-after 450 --script test/Presentation.cs
-ffmpeg -y -framerate 30 -i 'screenshots/result/frame%08d.png' \
-  -c:v libx264 -pix_fmt yuv420p -movflags +faststart screenshots/result/video.mp4
+[node name="GeneratedGame" type="Node3D"]
+script = ExtResource("1")
 ```
 
-On Windows, run import, builders, evaluators, and capture serially from PowerShell. Use the installed GPU renderer for the final capture; `--headless` is appropriate for import and structural evaluation, not for evidence frames:
+Godot compiles every `.cs` file under the project, including helper files not
+yet attached to a scene. A broken unused script still fails `dotnet build`.
+Keep one public Godot class per file, keep filenames/class names aligned, and
+avoid duplicate class names or namespaces across repair revisions.
+
+For reusable pieces, generate another `.tscn` plus script and instantiate it
+with `PackedScene`. Use `res://generated/...` paths. Never reference absolute,
+`file://`, `user://`, HTTP, parent-traversal, or machine-specific locations.
+
+The file safety gate also rejects generated code that attempts host filesystem,
+process, network, environment, reflection, native-interop, or unsafe access.
+Avoid even mentioning such API signatures in generated comments or strings,
+because the conservative scanner intentionally checks the entire source text.
+The trusted harness alone owns artifact I/O.
+
+## C# and Godot traps
+
+These failures often compile incompletely or appear only when the scene loads:
+
+- Every Godot class is `public partial class ... : NodeType`; a missing
+  `partial` produces a source-generator error.
+- Training examples are often GDScript-biased. Verify C# enums and method
+  signatures against the installed 4.7.1 assemblies. For example, mouse mode
+  is `Input.MouseModeEnum.Captured`, and guessed enum suffixes are unreliable.
+- Use Godot numeric types (`Vector2`, `Vector3`, `Color`, `Basis`, `Transform3D`)
+  consistently; do not accidentally mix `System.Numerics` types.
+- Call physics movement such as `CharacterBody3D.MoveAndSlide()` from
+  `_PhysicsProcess`, scale acceleration/damping by `delta`, and use
+  `speed *= Mathf.Exp(-rate * delta)` for frame-rate-independent decay.
+- A visible `MeshInstance3D` is not collision. Add `StaticBody3D`/
+  `CharacterBody3D` and primitive `CollisionShape3D` nodes where gameplay needs
+  contact.
+- Do not use imported mesh-derived trimesh/convex collision for ordinary props.
+  Box, sphere, and capsule shapes are faster and more predictable.
+- Procedural `ArrayMesh` geometry needs correct winding and generated normals
+  to receive lighting and shadows. Disabling culling hides winding bugs but
+  produces inconsistent lighting.
+- Keep node references after `AddChild`, and use `IsInstanceValid` before
+  accessing objects that may have been queued for deletion.
+- Connect signals once. Rebuilding UI or levels without disconnecting old
+  handlers causes duplicate scoring and state transitions.
+- For 2D custom drawing, update state then call `QueueRedraw()`; for 3D material
+  variations, duplicate mutable materials before changing per-instance values.
+- Capture cameras must see a lit, non-uniform frame. A camera inside geometry,
+  looking away from the scene, or rendering only the clear color fails capture
+  even though the scene technically loads.
+
+When writing `.tscn`/`.tres` text, keep `load_steps`, resource IDs, node parent
+paths, and quoted values consistent. A parser error is a failed revision. Do
+not attempt to hand-embed binary images or meshes into text resources; create
+compact procedural visuals from supported primitives, surfaces, particles,
+materials, and shaders.
+
+## Visual quality without external assets
+
+Primitive geometry can still read as an intentional game if it has a coherent
+visual system. Prefer:
+
+- a recognizable silhouette and focal landmark matching the prompt;
+- layered forms rather than isolated cubes/cylinders;
+- a small controlled palette with material roughness/metallic/emission chosen
+  by function;
+- directional key light, restrained fill/emission, sky/background, and fog
+  where appropriate;
+- decals or procedural line/shape detail, particles, and a generated shader
+  used selectively;
+- a camera composition that shows the mechanic and important spatial
+  relationship, not only the player at ground level;
+- readable UI with objective/state feedback and sufficient contrast.
+
+For a 3D game, keep procedural instance counts bounded. Large numbers of nodes,
+omni lights, transparent surfaces, particles, or collision bodies can turn a
+valid generated project into an unusable one. Use `MultiMeshInstance3D` only
+for simple generated meshes that do not need independent gameplay state; avoid
+depending on serialization behavior of imported GLB internals.
+
+## Build and load gates
+
+Toolchain versions are discovered by the host. The checked-in template pins
+Godot 4.7.1/.NET 8; do not silently change version-sensitive values based on
+memory. Verify installations with `godot --version` and `dotnet --version`.
+
+The pipeline restores from the discovered Godot NuGet package directory once,
+then builds every candidate without restoring again:
 
 ```powershell
-$GodotBin = $env:GODOT4_BIN
-if ([string]::IsNullOrWhiteSpace($GodotBin) -or
-    -not (Test-Path -LiteralPath $GodotBin)) {
-    throw 'Set GODOT4_BIN to the Godot 4 .NET executable.'
-}
-
-$RunId = 'r001'
-$FramesDir = Join-Path 'screenshots\result' $RunId
-New-Item -ItemType Directory -Force -Path $FramesDir | Out-Null
-
-dotnet build
-if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed' }
-& $GodotBin --headless --path . --import
-if ($LASTEXITCODE -ne 0) { throw 'Godot import failed' }
-& $GodotBin --path . --write-movie "$FramesDir/frame.png" `
-    --fixed-fps 30 --quit-after 450 --script test/Presentation.cs
-if ($LASTEXITCODE -ne 0) { throw 'Godot capture failed' }
-ffmpeg -y -framerate 30 -i "$FramesDir/frame%08d.png" `
-    -c:v libx264 -pix_fmt yuv420p -movflags +faststart "$FramesDir/video.mp4"
-if ($LASTEXITCODE -ne 0) { throw 'ffmpeg encoding failed' }
+dotnet restore --source <godot-nupkgs> --ignore-failed-sources
+dotnet build --no-restore
 ```
 
-Use a per-workspace lock around the complete build/import/evaluate/capture sequence. Store the owner PID and run ID, refuse a live lock, clear a stale lock only after verifying that PID is gone, and release it in `finally`; never fix contention by killing every Godot process. Use unique revision output paths and bounded retries for transient editor/antivirus file locks.
+A successful C# compile is necessary but not sufficient. The host then starts
+Godot headlessly from the actual project directory:
 
-Windows paths containing spaces or non-ASCII characters must be passed as quoted arguments and inspected with `-LiteralPath`. Keep run IDs and artifact paths shallow to avoid legacy `MAX_PATH` failures. If a third-party tool still mishandles the workspace path, reproduce the run from an explicitly chosen short ASCII path such as `D:\ptp\game`; do not silently rename or move the user's project.
+```powershell
+$env:PTP_RUN_ID = "<safe-run-id>"
+$env:PTP_REVISION = "0"
+$env:PTP_PROJECT_SHA256 = "<64-hex-generated-source-hash>"
+$env:PTP_AUTOMATION = "1"
+godot --headless --path . --quit-after 120
+```
 
-`--fixed-fps` makes motion deterministic (450 frames @30fps = 15s). **Pre-position the camera** in the builder/`_Initialize` (the first movie frame renders before `_Process`). Drive capture-time input from the script, not live keys. The clip must show the behavior progressing across the whole window — no dead time, no single looped frame.
+This loads the saved `GeneratedGame.tscn`, instantiates its scripts, and writes
+`artifacts/runs/<run-id>/rev_<n>/direct_structural_report.json`. Treat parser,
+managed exception, startup exit, missing/mismatched report, or any failed hard
+check as repair evidence. The host synthesizes declared actions and records
+hashed before/after state, then appends `host_process_completed` only after a
+clean Godot exit. Never replace a failed report with an invented pass.
+
+Generated-file snapshots and their hashes are taken before every build. If a
+later repair is worse, restore the selected snapshot and run
+`dotnet build --no-restore` again before play.
+
+## Screenshot capture
+
+Capture requires a rendering display driver; do not pass `--headless`:
+
+```powershell
+Remove-Item Env:PTP_AUTOMATION -ErrorAction SilentlyContinue
+$env:PTP_CAPTURE = "1"
+godot --path . --rendering-method gl_compatibility --audio-driver Dummy
+```
+
+The trusted harness visits the one or two cameras in
+`ptp_capture_camera`, waits for rendered frames, rejects empty or near-uniform
+images, saves PNGs under the current revision, and writes
+`capture_manifest.json` with resolution and SHA-256. The host verifies the
+manifest identity, relative paths, extension, count, and image hashes before
+sending screenshots to the VisualEvaluationAgent.
+
+The compatibility renderer makes the demo portable. Hardware Vulkan or a
+dedicated presentation build may improve final video quality, but optional
+video must never replace the standard hashed still evidence. If making a video
+after selection, use fixed FPS, scripted input, and a pre-positioned camera;
+the first movie frame can render before normal per-frame logic has corrected
+camera placement.
+
+## Windows process and path hygiene
+
+Run restore, build, structural evaluation, capture, and launch serially for one
+generated project. Do not work around file contention by killing every Godot
+process—the user may have another generated game open. Use unique run/revision
+directories and bounded retries for transient editor or antivirus locks.
+
+Pass paths containing spaces or non-ASCII characters as separate quoted
+arguments. In PowerShell, inspect filesystem targets with `-LiteralPath`.
+Keep artifact paths shallow to avoid legacy `MAX_PATH` failures. If a
+third-party executable demonstrably cannot handle the workspace path, reproduce
+the run from an explicitly chosen short ASCII path such as `D:\ptp\game`;
+never silently move or rename the user's project.
+
+The final visible launch clears automation/capture flags and opens the selected
+on-disk project. Closing that process does not delete the source or its evidence.

@@ -1,165 +1,178 @@
 # Prompt-to-Play on Godogen
 
-This fork adds a spec-driven Godot workflow to [Godogen](https://github.com/htdt/godogen): a user gives a natural-language world description and optional reference images, an Agent plans a validated world, and the same deterministic compiler turns different plans into explorable 3D scenes with lightweight objectives.
+This fork turns an arbitrary natural-language prompt and optional reference
+images directly into a playable Godot project. The model writes real Godot
+scenes, scripts, resources, and shaders below `generated/`; there is no
+WorldSpec or other fixed scene vocabulary between the prompt and the game.
 
-The floating mechanical city in `prompt_to_play/examples/` is only one acceptance fixture. It is not embedded in the compiler. A second foggy-forest fixture exercises the same generation and interaction code with a different theme, topology, entity set, and objective graph.
+The pipeline is therefore not tied to the mechanical-city example, a fixed
+number of regions, or one gameplay genre. A new test prompt can require a
+different setting, layout, camera, rules, controls, objectives, or visual
+style, and the ProjectGeneratorAgent implements those requirements in Godot
+code and scene files.
 
-## What is implemented
-
-- A versioned, engine-independent `WorldSpec`, `PatchSpec`, evaluation policy, and validator.
-- A reusable Godot 4.7 C# scaffold that builds regions, roads, buildings, props, lights, fixed cameras, generic interactables, objectives, and a reachable exit from data.
-- A desktop launcher where the player enters an arbitrary prompt and optional reference images, then watches Plan -> Validate -> Publish -> Build -> Play run off the UI thread.
-- An API-first multi-agent runtime with three isolated model roles—WorldPlanner, VisualEvaluation, and Repair—using strict JSON hand-offs, per-call hashes, timing, model, and Token traces.
-- A separate AssetAgent tool worker that turns semantic prefab requests into cached API-generated GLBs, plus a strict Godot catalog and deterministic primitive fallback when an asset is unresolved.
-- A Godot PrefabResolver that loads real `.glb`/`.gltf` scenes, enables shadows and collision, and records whether each entity used a catalog asset or fallback geometry.
-- WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
-- Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
-- An implemented screenshot feedback loop: VisualEvaluationAgent judges fixed-camera renders, RepairAgent returns a validated revision, the host derives a stable-ID PatchSpec, and the system performs at most two correction rounds before selecting the best revision.
-- A cross-platform publisher and Python CI matrix for Windows and Linux.
-
-The host Agent performs prompt/reference interpretation and visual judgement. The repository supplies its runtime protocol, deterministic execution layer, contracts, evidence format, and correction guardrails. The scope is prompt-conditioned explorable 3D worlds, not arbitrary game genres or photorealistic reconstruction.
-
-## Public input and internal measurements
-
-The public request contains only:
-
-1. a natural-language description; and
-2. optional reference images.
-
-The request hash and seed are derived internally. Evaluation weights, thresholds, normalization references, and correction limit come from the versioned policy. Generation time, model calls, Token usage, scores, and reproducibility hashes are recorded outputs—not parameters that the user must provide.
-
-## Quick start
-
-Prerequisites are Python 3.11+, the .NET 8 SDK, and the .NET build of Godot 4.7.x.
-
-### Enter a prompt and play
-
-On Windows, the complete path with realistic API-generated assets is the masked
-launcher (it prompts locally for the three required credentials):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ImageProvider gemini
-```
-
-The launcher defaults to Micu's OpenAI Responses-compatible endpoint and all
-three model roles use `gpt-5.6-sol`; override the model with `-Model <model-id>`.
-Use `-ApiProvider openai` only when the official OpenAI endpoint is intended.
-To run with only the model API and accept primitive asset fallbacks, add
-`-AssetMode off`; that mode prompts for only the selected provider's key.
-
-Enter any world description, optionally add reference images, and choose
-`生成并启动`. The launcher performs structured planning, contract validation,
-publishing, .NET compilation, a headless Godot structural check, and only then
-opens the playable game. Every run gets its own project under
-`../output/generated/<request-hash>/run-<id>/`, so regenerating the same prompt
-cannot overwrite a game that is still open. The example worlds are never used
-as runtime fallbacks.
-
-If the required environment variables are already configured, the GUI can also
-be started with `python -m prompt_to_play.pipeline`. The interactive multi-agent runtime is API-first and requires
-`PROMPT_TO_PLAY_API_KEY` (or `OPENAI_API_KEY`). It sends selected reference
-images and generated screenshots as real image inputs. A signed-in Codex CLI is
-kept only as an explicitly selected development fallback by setting
-`PROMPT_TO_PLAY_PROVIDER=codex`.
-
-For the complete realistic-asset path, configure an image provider key
-(`GEMINI_API_KEY`/`GOOGLE_API_KEY` or `XAI_API_KEY`) and
-`TRIPO3D_API_KEY`, then set `PROMPT_TO_PLAY_ASSET_MODE=auto`. Asset generation
-is paid and therefore defaults to `off`; cache hits remain available in every
-mode. The Windows launcher above does not write keys to disk, logs,
-command-line arguments, or Git.
-
-For Micu, the launcher fixes the base URL to `https://www.micuapi.ai/v1`, uses
-the Responses protocol, and supplies the Codex-style User-Agent required by its
-compatibility gateway. Direct environment-based startup can configure the same
-header with `PROMPT_TO_PLAY_USER_AGENT`.
-
-Do not paste API keys into source files or chat messages. The script places
-them only in the launched process environment and removes its own copies after
-startup.
-
-Player controls are WASD + mouse, Space to jump, and E to interact. Seed, time,
-Token use, thresholds, and correction limits are not fields in this launcher:
-the seed is derived internally, while time and Token use remain evaluation
-outputs.
-
-### Editable generated game
-
-The repository includes one clean development snapshot at
-`demos/topographic-highland-circuit/`. It is a complete editable Godot .NET
-project containing the selected WorldSpec, scene, runtime scripts, and asset
-catalog, without generated caches, API credentials, Agent logs, or discarded
-revisions. Teammates can open its `project.godot` directly without an API key;
-an API key is needed only to generate another game from a new prompt.
-
-### Publish for a host Agent
-
-Publish a Codex-ready Godot project:
-
-```powershell
-python publish.py --engine godot --agent codex --workflow prompt-to-play --out D:\ptp-game
-Set-Location D:\ptp-game
-python prompt_to_play/lifecycle.py create-request --prompt "your world description" --output request.json
-python prompt_to_play/contracts.py validate-world spec/world.json
-dotnet build
-$env:PTP_RUN_ID = "acceptance-001"
-$env:PTP_REVISION = "0"
-godot --headless --path . --quit-after 5
-$env:PTP_CAPTURE = "1"
-godot --path . --rendering-method gl_compatibility --audio-driver Dummy
-Remove-Item Env:PTP_CAPTURE
-godot --path .
-```
-
-For Claude Code, change `--agent codex` to `--agent claude`. Re-publishing fills missing scaffold files without overwriting project scripts or `spec/world.json`; `--force` intentionally recreates a safe target from scratch.
-
-Then give the host Agent the actual world prompt and any references. Its published `AGENTS.md` or `CLAUDE.md` requires this loop:
+## Architecture
 
 ```text
-prompt + optional references
-        -> Plan and validate WorldSpec
-        -> Execute deterministic Godot compiler
-        -> Evaluate structure and fixed-camera evidence
-        -> Feedback Agent emits accept/patch/rollback/stop
-        -> Rebuild and select best revision
+prompt + optional reference images
+        -> ProjectGeneratorAgent emits generated/**
+        -> strict path/content safety checks
+        -> Godot .NET build + headless structural check
+        -> rendered screenshots
+        -> VisualEvaluationAgent compares prompt/references/renders
+        -> CodeRepairAgent emits a generated/** file patch
+        -> rebuild, reevaluate, and select the best revision
+        -> launch the selected playable project
 ```
 
-Headless execution writes the build manifest and structural report to
-`artifacts/runs/<run-id>/rev_<n>/`. Capture mode visits every WorldSpec camera,
-rejects empty or near-uniform frames, writes PNGs, and records their SHA-256
-digests in `capture_manifest.json`. Set `PTP_REVISION` to `1` or `2` only after
-a validated feedback patch; earlier evidence remains untouched.
+The model-owned and trusted portions are intentionally separated:
 
-## Contracts and tests
+- `generated/**` is model-owned. The model must create
+  `generated/GeneratedGame.tscn` and may add C#, GDScript, scenes, resources,
+  shaders, JSON, or Markdown inside that directory.
+- `project.godot`, the `.csproj`, and `harness/**` are repository-owned. The
+  model cannot replace them. The harness loads the generated entry scene,
+  synthesizes declared input actions, verifies observable player-state changes,
+  captures one or two evaluation views, and writes evidence bound to the
+  generated-project hash.
+- Before a model response changes disk, the host rejects traversal, absolute
+  paths, unsupported extensions, oversized packages, links/junctions, and
+  generated code that attempts process, network, host-filesystem, environment,
+  reflection, native-interop, or unsafe access.
+
+The ProjectGeneratorAgent, VisualEvaluationAgent, and CodeRepairAgent use
+separate model calls and auditable traces. Build errors are repair evidence as
+well as visual feedback, so a correction can fix compilation, scene loading,
+gameplay, or presentation. The visual Agent scores prompt fidelity,
+composition, coherence, detail, lighting/materials, and gameplay readability;
+the host owns the weighted acceptance gate. Earlier revisions remain immutable,
+and an accepted revision always outranks a merely high-scoring rejected one.
+The default loop permits four repair rounds (hard internal ceiling: six). If no
+revision passes, the best project and evidence remain on disk but are not
+reported or launched as a completed game.
+
+## Requirements
+
+- Windows with PowerShell for the masked convenience launcher
+- Python 3.11 or newer
+- .NET 8 SDK
+- Godot 4.7.x .NET (console and rendered executables discoverable by the
+  launcher)
+- An API key for an OpenAI Responses-compatible endpoint
+
+The runtime does **not** require the Codex CLI. CPU-only machines can run
+generation, compilation, and structural checks; a GPU materially improves
+rendering speed and visual evaluation but is not required for the pipeline.
+
+## Run it
+
+The recommended Windows entry point asks for the API key using masked local
+input:
 
 ```powershell
-python prompt_to_play/contracts.py validate-world prompt_to_play/examples/world.json
-python prompt_to_play/contracts.py validate-world prompt_to_play/examples/forest_world.json
-python -m unittest discover -s tests -v
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
 ```
 
-See [the architecture and rubric mapping](docs/PROMPT_TO_PLAY.md) for the system boundary and evaluation evidence. The six recorded metrics are scene similarity, structural correctness, automation-loop completeness, generation speed, Token efficiency, and reproducibility.
+Defaults are the Micu endpoint and `gpt-5.6-sol`. Other supported forms are:
 
-CPU-only execution is sufficient for contract validation, compilation, headless structural checks, and basic compatibility rendering. A GPU is useful for faster high-quality screenshots, video, or local generative models, but it is not required for this scaffold.
+```powershell
+# Official OpenAI endpoint
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 `
+  -ApiProvider openai -Model <model-id>
+
+# Another Responses-compatible endpoint
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 `
+  -ApiProvider custom -BaseUrl https://example.com/v1 -Model <model-id>
+```
+
+The script passes the key only through the launched process environment and
+clears its own copy after startup. It does not put credentials in source files,
+Git, logs, or command-line arguments. Do not paste API keys into this repository
+or chat messages.
+
+The Micu launcher uses its documented Codex-style Responses subset and a
+10-minute per-call timeout because a complete Godot source package can take
+several minutes to generate. Returned JSON is still validated locally against
+the strict file, path, size, and host-capability contract before any file is
+written.
+
+If the environment is already configured, start the same GUI directly:
+
+```powershell
+$env:PROMPT_TO_PLAY_PROVIDER = "http"
+$env:PROMPT_TO_PLAY_API_STYLE = "responses"
+$env:PROMPT_TO_PLAY_BASE_URL = "https://www.micuapi.ai/v1"
+$env:PROMPT_TO_PLAY_MODEL = "gpt-5.6-sol"
+# Set PROMPT_TO_PLAY_API_KEY only in the current process, then:
+python -m prompt_to_play.direct_pipeline
+```
+
+In the desktop launcher, enter any game prompt, optionally add reference
+images, and choose `生成并启动`. Seed is derived internally. Time, Token use,
+scores, and output hashes are recorded evaluation results rather than required
+input fields.
+
+## Generated output and replay
+
+Each generation has a unique project directory under:
+
+```text
+../output/generated/<request-hash>/run-<id>/
+```
+
+Closing the game does not delete it. The directory contains a normal editable
+Godot .NET project, the selected `generated/**` source, and run evidence under
+`artifacts/runs/<run-id>/rev_<n>/`. Open its `project.godot` in Godot or run it
+again without another model call. A teammate can play or edit a copied
+generated project without an API key; an API key is needed only to generate or
+repair a different game.
+
+Evidence includes the original request and reference hashes, direct-file
+manifests, compiler and structural results, screenshot manifests, visual
+feedback, model timing/Token traces, and final revision selection. It does not
+contain API credentials.
+
+## Test
+
+```powershell
+python -m pytest -q
+python -m py_compile start_prompt_to_play.py `
+  prompt_to_play/direct_generation.py `
+  prompt_to_play/direct_agents.py `
+  prompt_to_play/direct_pipeline.py
+```
+
+The strongest demonstration is to run two semantically different prompts
+through the same launcher, show that both produce playable projects, and then
+show one evidence-backed repair iteration. The six course measurements remain
+scene similarity, structural correctness, automation-loop completeness,
+generation speed, Token efficiency, and reproducibility.
 
 ## Source layout
 
-- `prompts/prompt-to-play.md` — Agent runtime protocol and stopping rules.
-- `prompt_to_play/contracts.py` — validation, canonical hashes, policy scoring, and safe patch application.
-- `prompt_to_play/lifecycle.py` — canonical request creation and deterministic best-revision selection.
-- `prompt_to_play/provider.py` — Codex CLI and OpenAI-compatible structured-output adapters.
-- `prompt_to_play/agents.py` — isolated API-agent sessions, role-specific models, Token accounting, and auditable traces.
-- `prompt_to_play/planner.py` — arbitrary prompt/reference planning into a validated WorldSpec.
-- `prompt_to_play/assets.py` — AssetAgent requests, paid API opt-in, content-addressed GLB cache, catalog, and manifest.
-- `prompt_to_play/evaluator.py` — VisualEvaluationAgent, RepairAgent, and deterministic WorldSpec-to-PatchSpec diff.
+- `prompt_to_play/direct_generation.py` — strict direct-file schema, code/path
+  safety checks, atomic patch application, and content-addressed manifests.
+- `prompt_to_play/direct_common.py` and `direct_host.py` — request hashing,
+  evidence serialization, toolchain discovery, and trusted process boundaries.
+- `prompt_to_play/direct_evaluation.py` — direct-project visual feedback schema
+  and host-owned acceptance gate.
+- `prompt_to_play/direct_agents.py` — ProjectGenerator, visual-evaluation, and
+  code-repair model roles.
+- `prompt_to_play/direct_pipeline.py` — generation, build, verification,
+  feedback, revision selection, and launch orchestration.
+- `prompt_to_play/direct_template/` — trusted Godot host and generated entry
+  boundary.
 - `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.
-- `prompt_to_play/pipeline.py` — concrete planning, publishing, build, structural-check, and launch stages.
-- `prompt_to_play/evaluation_policy.json` — internal evaluation configuration.
-- `prompt_to_play/godot_template/` — reusable data-driven Godot project.
-- `engines/godot.md` — Godot generation, verification, and capture guidance.
-- `publish.py` / `publish.sh` — cross-platform project publisher.
-- `tests/` — contract, generality, patch-safety, and publishing tests.
+- `scripts/start_prompt_to_play_api.ps1` — masked API launcher.
+- `tests/` — safety, contract, Agent, template, and integration tests.
+
+The older schema-driven modules remain only as archived implementation
+reference for previous experiments. They are not imported by the direct
+runtime, installed by the Prompt-to-Play publisher, or supported as a startup
+path.
 
 ## Upstream and license
 
-This work remains a fork of Godogen and preserves its multi-engine autonomous workflow. Use `--workflow autonomous` (the default) for the original thin publisher behavior. See [LICENSE.md](LICENSE.md) and the upstream project for attribution and licensing details.
+This remains a fork of [Godogen](https://github.com/htdt/godogen). See
+[LICENSE.md](LICENSE.md) and the upstream project for attribution and licensing
+details.

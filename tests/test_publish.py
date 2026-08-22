@@ -12,6 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 import publish as publisher  # noqa: E402
+from prompt_to_play import direct_generation, direct_pipeline  # noqa: E402
+from prompt_to_play.launcher import LaunchRequest, PipelineState  # noqa: E402
 
 
 class PublishArgumentTests(unittest.TestCase):
@@ -104,9 +106,13 @@ class PublishIntegrationTests(unittest.TestCase):
                             encoding="utf-8"
                         )
                         self.assertNotIn("${", skill_text)
-                        expected_command = "/asset-gen" if agent == "claude" else "$asset-gen"
+                        expected_command = (
+                            "/asset-gen" if agent == "claude" else "$asset-gen"
+                        )
                         self.assertIn(expected_command, skill_text)
-                        expected_assets = "src/assets" if engine == "babylon" else "assets"
+                        expected_assets = (
+                            "src/assets" if engine == "babylon" else "assets"
+                        )
                         self.assertIn(expected_assets, skill_text)
 
                         metadata = skill_root / "agents" / "openai.yaml"
@@ -136,20 +142,40 @@ class PublishIntegrationTests(unittest.TestCase):
                 (target / "AGENTS.md").read_text(encoding="utf-8"),
                 expected_manifest,
             )
-            for source in (REPO_ROOT / "prompt_to_play").rglob("*"):
-                relative = source.relative_to(REPO_ROOT / "prompt_to_play")
-                if (
-                    source.is_file()
-                    and "__pycache__" not in source.parts
-                    and source.suffix != ".pyc"
-                    and relative.parts[0] != "godot_template"
-                ):
-                    copied = target / "prompt_to_play" / relative
-                    self.assertTrue(copied.is_file(), relative)
-                    self.assertEqual(copied.read_bytes(), source.read_bytes(), relative)
-            self.assertFalse((target / "prompt_to_play" / "godot_template").exists())
+            runtime_source = REPO_ROOT / "prompt_to_play"
+            runtime_target = target / "prompt_to_play"
+            for relative_text in publisher.PROMPT_TO_PLAY_RUNTIME_FILES:
+                relative = Path(relative_text)
+                copied = runtime_target / relative
+                source = runtime_source / relative
+                self.assertTrue(copied.is_file(), relative)
+                self.assertEqual(copied.read_bytes(), source.read_bytes(), relative)
 
-            template = REPO_ROOT / "prompt_to_play" / "godot_template"
+            published_runtime_files = {
+                path.relative_to(runtime_target).as_posix()
+                for path in runtime_target.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(
+                published_runtime_files,
+                set(publisher.PROMPT_TO_PLAY_RUNTIME_FILES),
+            )
+            self.assertFalse((target / "prompt_to_play" / "direct_template").exists())
+            self.assertFalse((target / "prompt_to_play" / "godot_template").exists())
+            for legacy in (
+                "assets.py",
+                "contracts.py",
+                "evaluation_policy.json",
+                "evaluator.py",
+                "examples",
+                "lifecycle.py",
+                "pipeline.py",
+                "planner.py",
+            ):
+                with self.subTest(legacy=legacy):
+                    self.assertFalse((runtime_target / legacy).exists())
+
+            template = REPO_ROOT / "prompt_to_play" / "direct_template"
             for source in template.rglob("*"):
                 if (
                     source.is_file()
@@ -157,15 +183,14 @@ class PublishIntegrationTests(unittest.TestCase):
                     and source.suffix != ".pyc"
                 ):
                     relative = source.relative_to(template)
-                    if relative == Path("spec/world.json"):
-                        continue
                     copied = target / relative
                     self.assertTrue(copied.is_file(), relative)
                     self.assertEqual(copied.read_bytes(), source.read_bytes(), relative)
-            self.assertEqual(
-                (target / "spec" / "world.json").read_bytes(),
-                (REPO_ROOT / "prompt_to_play" / "examples" / "world.json").read_bytes(),
-            )
+            self.assertTrue((target / "project.godot").is_file())
+            self.assertTrue((target / "PromptToPlayDirect.csproj").is_file())
+            self.assertTrue((target / "harness" / "Main.tscn").is_file())
+            self.assertTrue((target / "generated" / "GeneratedGame.cs").is_file())
+            self.assertFalse((target / "spec" / "world.json").exists())
             self.assertTrue(
                 (
                     target
@@ -177,6 +202,79 @@ class PublishIntegrationTests(unittest.TestCase):
                 ).is_file()
             )
 
+    def test_published_root_is_a_self_contained_direct_pipeline_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temporary = Path(temp_name)
+            published_root = temporary / "published"
+            self.publish_quietly(published_root, workflow="prompt-to-play")
+
+            package = {
+                "schema": direct_generation.DIRECT_GENERATION_CONTRACT,
+                "files": [
+                    {
+                        "path": "generated/GeneratedGame.tscn",
+                        "action": "upsert",
+                        "content": (
+                            "[gd_scene format=3]\n"
+                            '[node name="GeneratedGame" type="Node3D"]\n'
+                        ),
+                    },
+                    {
+                        "path": "generated/Game.cs",
+                        "action": "upsert",
+                        "content": (
+                            "using Godot; public partial class Game : Node3D {}\n"
+                        ),
+                    },
+                ],
+            }
+            stages = direct_pipeline.DirectPipelineStages(
+                direct_pipeline.DirectPipelineDependencies(
+                    source_repo_root=published_root,
+                    output_root=temporary / "generated-projects",
+                    environment={"PATH": ""},
+                    generate_project=lambda *_args, **_kwargs: package,
+                    which=lambda _name: None,
+                )
+            )
+            state = PipelineState(LaunchRequest.from_values("a direct test game"))
+            stages.plan(state, lambda _message: None)
+            stages.validate(state, lambda _message: None)
+            stages.publish(state, lambda _message: None)
+
+            generated_project = Path(
+                state.require_result(direct_pipeline.PROJECT_RESULT)
+            )
+            self.assertEqual(
+                direct_pipeline._direct_template_source(published_root),
+                published_root,
+            )
+            trusted_files = [
+                Path(".gitignore"),
+                Path("project.godot"),
+                Path("PromptToPlayDirect.csproj"),
+                *[
+                    path.relative_to(published_root)
+                    for path in (published_root / "harness").rglob("*")
+                    if path.is_file()
+                ],
+            ]
+            for relative in trusted_files:
+                with self.subTest(relative=relative):
+                    self.assertEqual(
+                        (generated_project / relative).read_bytes(),
+                        (published_root / relative).read_bytes(),
+                    )
+            self.assertEqual(
+                (generated_project / "generated" / "GeneratedGame.tscn").read_text(
+                    encoding="utf-8"
+                ),
+                package["files"][0]["content"],
+            )
+            self.assertFalse(
+                (published_root / "prompt_to_play" / "direct_template").exists()
+            )
+
     def test_prompt_republish_preserves_user_scaffold_and_adds_missing_files(
         self,
     ) -> None:
@@ -184,17 +282,13 @@ class PublishIntegrationTests(unittest.TestCase):
             target = Path(temp_name) / "game"
             self.publish_quietly(target, workflow="prompt-to-play")
 
-            template = REPO_ROOT / "prompt_to_play" / "godot_template"
-            script_source = next(
-                path for path in sorted((template / "scripts").rglob("*")) if path.is_file()
-            )
+            template = REPO_ROOT / "prompt_to_play" / "direct_template"
+            script_source = template / "generated" / "GeneratedGame.cs"
             script_target = target / script_source.relative_to(template)
             project_target = target / "project.godot"
-            spec_target = target / "spec" / "world.json"
-            user_file = target / "scripts" / "user_created.cs"
+            user_file = target / "generated" / "user_created.cs"
             project_target.write_text("user project settings\n", encoding="utf-8")
             script_target.write_text("// user script edit\n", encoding="utf-8")
-            spec_target.write_text('{"user": "world"}\n', encoding="utf-8")
             user_file.write_text("// keep me\n", encoding="utf-8")
 
             missing_source = next(
@@ -204,7 +298,6 @@ class PublishIntegrationTests(unittest.TestCase):
                     path.is_file()
                     and path != script_source
                     and path.name != "project.godot"
-                    and path.relative_to(template) != Path("spec/world.json")
                 )
             )
             missing_target = target / missing_source.relative_to(template)
@@ -218,25 +311,23 @@ class PublishIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 script_target.read_text(encoding="utf-8"), "// user script edit\n"
             )
-            self.assertEqual(
-                spec_target.read_text(encoding="utf-8"), '{"user": "world"}\n'
-            )
             self.assertEqual(user_file.read_text(encoding="utf-8"), "// keep me\n")
             self.assertEqual(missing_target.read_bytes(), missing_source.read_bytes())
+            self.assertFalse((target / "spec" / "world.json").exists())
 
     def test_prompt_force_rebuild_restores_the_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             target = Path(temp_name) / "game"
             self.publish_quietly(target, workflow="prompt-to-play")
 
-            template = REPO_ROOT / "prompt_to_play" / "godot_template"
-            script_source = next(
-                path for path in sorted((template / "scripts").rglob("*")) if path.is_file()
-            )
+            template = REPO_ROOT / "prompt_to_play" / "direct_template"
+            script_source = template / "generated" / "GeneratedGame.cs"
             script_target = target / script_source.relative_to(template)
             (target / "project.godot").write_text("modified\n", encoding="utf-8")
             script_target.write_text("modified\n", encoding="utf-8")
-            (target / "spec" / "world.json").write_text("{}\n", encoding="utf-8")
+            spec_target = target / "spec" / "world.json"
+            spec_target.parent.mkdir(parents=True)
+            spec_target.write_text("{}\n", encoding="utf-8")
             extra = target / "user-only.txt"
             extra.write_text("remove on force\n", encoding="utf-8")
 
@@ -247,10 +338,7 @@ class PublishIntegrationTests(unittest.TestCase):
                 (template / "project.godot").read_bytes(),
             )
             self.assertEqual(script_target.read_bytes(), script_source.read_bytes())
-            self.assertEqual(
-                (target / "spec" / "world.json").read_bytes(),
-                (REPO_ROOT / "prompt_to_play" / "examples" / "world.json").read_bytes(),
-            )
+            self.assertFalse(spec_target.exists())
             self.assertFalse(extra.exists())
 
     def test_republish_replaces_only_asset_gen(self) -> None:
@@ -313,7 +401,7 @@ class PublishIntegrationTests(unittest.TestCase):
 
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "still here")
 
-    def test_prompt_source_layout_requires_the_godot_template(self) -> None:
+    def test_prompt_source_layout_requires_the_direct_template(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             source_root = Path(temp_name) / "source"
             config = publisher.PublishConfig(
@@ -334,7 +422,7 @@ class PublishIntegrationTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError) as raised:
                 publisher.validate_source_layout(config, source_root)
 
-            self.assertIn("godot_template", str(raised.exception))
+            self.assertIn("direct_template", str(raised.exception))
 
 
 class WrapperTests(unittest.TestCase):

@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from . import contracts
+from . import direct_common
 from .provider import ProviderUsage, create_provider_from_env
 
 
@@ -25,15 +25,25 @@ TRACE_SCHEMA = "prompt-to-play/agent-trace@1"
 
 
 class AgentRole(str, Enum):
+    PROJECT_GENERATOR = "project_generator"
+    CODE_REPAIR = "code_repair"
     WORLD_PLANNER = "world_planner"
     VISUAL_EVALUATOR = "visual_evaluator"
     REPAIR = "repair"
 
 
 ROLE_MODEL_ENV: Mapping[AgentRole, str] = {
+    AgentRole.PROJECT_GENERATOR: "PROMPT_TO_PLAY_PLANNER_MODEL",
+    AgentRole.CODE_REPAIR: "PROMPT_TO_PLAY_REPAIR_MODEL",
     AgentRole.WORLD_PLANNER: "PROMPT_TO_PLAY_PLANNER_MODEL",
     AgentRole.VISUAL_EVALUATOR: "PROMPT_TO_PLAY_EVALUATOR_MODEL",
     AgentRole.REPAIR: "PROMPT_TO_PLAY_REPAIR_MODEL",
+}
+
+ROLE_MAX_OUTPUT_TOKENS: Mapping[AgentRole, str] = {
+    AgentRole.PROJECT_GENERATOR: "20000",
+    AgentRole.CODE_REPAIR: "16000",
+    AgentRole.VISUAL_EVALUATOR: "6000",
 }
 
 
@@ -153,7 +163,7 @@ class TracingAgentProvider:
             "schema_name": schema_name,
             "image_sha256": list(image_sha256),
         }
-        input_sha256 = contracts.document_sha256(request_document)
+        input_sha256 = direct_common.document_sha256(request_document)
         before = _usage(self.provider)
         output_sha256: str | None = None
         error_type: str | None = None
@@ -165,7 +175,7 @@ class TracingAgentProvider:
                 schema_name=schema_name,
                 image_paths=image_paths,
             )
-            output_sha256 = contracts.document_sha256(document)
+            output_sha256 = direct_common.document_sha256(document)
             return document
         except Exception as exc:
             status = "error"
@@ -210,9 +220,7 @@ class MultiAgentRuntime:
         provider_factory: ProviderFactory | None = None,
     ) -> None:
         self.repo = Path(repo).resolve(strict=True)
-        self.environment = dict(
-            os.environ if environment is None else environment
-        )
+        self.environment = dict(os.environ if environment is None else environment)
         self._provider_factory = (
             self._default_provider_factory
             if provider_factory is None
@@ -236,6 +244,10 @@ class MultiAgentRuntime:
         role_model = env.get(ROLE_MODEL_ENV[role], "").strip()
         if role_model:
             env["PROMPT_TO_PLAY_MODEL"] = role_model
+        if not env.get("PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS", "").strip():
+            role_limit = ROLE_MAX_OUTPUT_TOKENS.get(role)
+            if role_limit:
+                env["PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS"] = role_limit
         return create_provider_from_env(env, repo=repo)
 
     def _next_sequence(self) -> int:
@@ -282,14 +294,16 @@ class MultiAgentRuntime:
 
     def write_trace(self, path: str | Path, *, run_id: str) -> Path:
         output = Path(path)
+        with self._lock:
+            active_roles = [role.value for role in self._agents]
         document = {
             "schema": TRACE_SCHEMA,
             "run_id": run_id,
-            "agents": [role.value for role in AgentRole],
+            "agents": active_roles,
             "calls": [asdict(trace) for trace in self.traces()],
             "usage": asdict(self.aggregate_usage()),
         }
         document["usage"]["total_tokens"] = self.aggregate_usage().total_tokens
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(contracts.canonical_json_bytes(document) + b"\n")
+        output.write_bytes(direct_common.canonical_json_bytes(document) + b"\n")
         return output

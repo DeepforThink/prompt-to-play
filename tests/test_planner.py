@@ -70,6 +70,8 @@ class ProviderConfigTests(unittest.TestCase):
                 "PROMPT_TO_PLAY_MODEL": "local-model",
                 "PROMPT_TO_PLAY_BASE_URL": "http://127.0.0.1:9000/v1/",
                 "PROMPT_TO_PLAY_API_STYLE": "responses",
+                "PROMPT_TO_PLAY_STRUCTURED_OUTPUT_MODE": "prompt",
+                "PROMPT_TO_PLAY_STREAM_RESPONSES": "true",
                 "PROMPT_TO_PLAY_TIMEOUT_SECONDS": "9.5",
                 "PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS": "2048",
                 "PROMPT_TO_PLAY_USER_AGENT": "codex_cli_rs/0.77.0 test",
@@ -78,6 +80,8 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(config.model, "local-model")
         self.assertEqual(config.base_url, "http://127.0.0.1:9000/v1")
         self.assertEqual(config.api_style, "responses")
+        self.assertEqual(config.structured_output_mode, "prompt")
+        self.assertTrue(config.stream_responses)
         self.assertEqual(config.timeout_seconds, 9.5)
         self.assertEqual(config.max_output_tokens, 2048)
         self.assertEqual(config.user_agent, "codex_cli_rs/0.77.0 test")
@@ -207,6 +211,46 @@ class HttpProviderTests(unittest.TestCase):
                     1,
                 )
         self.assertEqual(str(raised.exception), "provider HTTP 401")
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_http_error_exposes_only_local_categories_and_field_hints(self):
+        secret = "sk-this-must-never-appear"
+        private_prompt = "private prompt must never appear"
+        body = {
+            "error": {
+                "type": "invalid_request_error",
+                "code": secret,
+                "param": "text.format.schema",
+                "message": (
+                    "Unsupported json_schema anyOf; " + private_prompt + " " + secret
+                ),
+            }
+        }
+        failure = urlerror.HTTPError(
+            "https://example.invalid/v1/responses",
+            400,
+            private_prompt,
+            {"X-Debug": secret},
+            io.BytesIO(json.dumps(body).encode("utf-8")),
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = failure
+        with mock.patch.object(provider.request, "build_opener", return_value=opener):
+            with self.assertRaises(provider.ProviderRequestError) as raised:
+                provider._default_transport(
+                    "https://example.invalid/v1/responses",
+                    {"Authorization": f"Bearer {secret}"},
+                    private_prompt.encode("utf-8"),
+                    1,
+                )
+        diagnostic = str(raised.exception)
+        self.assertIn("provider HTTP 400", diagnostic)
+        self.assertIn("invalid request", diagnostic)
+        self.assertIn("json_schema", diagnostic)
+        self.assertIn("anyof", diagnostic)
+        self.assertNotIn(secret, diagnostic)
+        self.assertNotIn(private_prompt, diagnostic)
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_redirects_are_disabled_to_keep_authorization_on_one_origin(self):
         handler = provider._NoRedirectHandler()
@@ -349,10 +393,65 @@ class HttpProviderTests(unittest.TestCase):
         )
         self.assertEqual(document, {"ok": True})
         self.assertEqual(captured["url"], "https://example.test/v1/responses")
-        self.assertEqual(
-            captured["headers"]["User-Agent"], "codex_cli_rs/0.77.0 test"
-        )
+        self.assertEqual(captured["headers"]["User-Agent"], "codex_cli_rs/0.77.0 test")
         self.assertEqual(captured["payload"]["text"]["format"]["type"], "json_schema")
+
+    def test_prompt_structured_responses_payload_uses_codex_style_subset(self):
+        captured = {}
+
+        def transport(_url, _headers, payload, _timeout):
+            captured["payload"] = json.loads(payload.decode("utf-8"))
+            return (
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","delta":"{\\"ok\\":"}\n\n'
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","delta":"true}"}\n\n'
+                "event: response.completed\n"
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"model":"gpt-5.6-sol","usage":{"input_tokens":10,'
+                '"output_tokens":3,"input_tokens_details":{"cached_tokens":0}}}}\n\n'
+                "data: [DONE]\n\n"
+            ).encode("utf-8")
+
+        client = provider.OpenAICompatibleProvider(
+            provider.ProviderConfig(
+                api_key="secret",
+                model="gpt-5.6-sol",
+                base_url="https://www.micuapi.ai/v1",
+                api_style="responses",
+                structured_output_mode="prompt",
+                stream_responses=True,
+                max_output_tokens=12000,
+            ),
+            transport=transport,
+        )
+        document = client.generate_json(
+            [
+                {"role": "system", "content": "Follow the host contract."},
+                {"role": "user", "content": "make json"},
+            ],
+            json_schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+            schema_name="result",
+        )
+
+        payload = captured["payload"]
+        self.assertEqual(document, {"ok": True})
+        self.assertEqual(payload["input"], "make json")
+        self.assertIn("Follow the host contract.", payload["instructions"])
+        self.assertIn('"required":["ok"]', payload["instructions"])
+        self.assertEqual(payload["max_output_tokens"], 12000)
+        self.assertFalse(payload["store"])
+        self.assertTrue(payload["stream"])
+        self.assertNotIn("text", payload)
+        self.assertNotIn("temperature", payload)
+        usage = client.usage_summary()
+        self.assertEqual(usage.total_tokens, 13)
+        self.assertTrue(usage.exact)
 
     def test_chat_and_responses_encode_local_images_as_data_urls(self):
         with tempfile.TemporaryDirectory() as temporary:

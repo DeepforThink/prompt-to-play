@@ -62,7 +62,7 @@ class FakeController:
 
 class LaunchRequestTests(unittest.TestCase):
     def test_requires_a_non_empty_prompt(self):
-        with self.assertRaisesRegex(ValueError, "游戏世界描述"):
+        with self.assertRaisesRegex(ValueError, "想生成的游戏描述"):
             LaunchRequest.from_values(" \n ")
 
     def test_normalizes_and_deduplicates_reference_images(self):

@@ -20,6 +20,18 @@ ENGINES = {
 }
 AGENTS = {"claude", "codex"}
 WORKFLOWS = {"autonomous", "prompt-to-play"}
+PROMPT_TO_PLAY_RUNTIME_FILES = (
+    "README.md",
+    "agents.py",
+    "direct_agents.py",
+    "direct_common.py",
+    "direct_evaluation.py",
+    "direct_generation.py",
+    "direct_host.py",
+    "direct_pipeline.py",
+    "launcher.py",
+    "provider.py",
+)
 
 
 @dataclass(frozen=True)
@@ -104,7 +116,9 @@ def validate_force_target(target: Path, repo_root: Path = REPO_ROOT) -> None:
             f"refusing to delete the source repo, its ancestor, or its contents: {resolved}"
         )
     if _is_relative_to(home, resolved):
-        raise ValueError(f"refusing to delete the home directory or its ancestor: {resolved}")
+        raise ValueError(
+            f"refusing to delete the home directory or its ancestor: {resolved}"
+        )
     if target.is_symlink():
         raise ValueError(f"refusing to force-publish through a symlink: {target}")
     is_junction = getattr(target, "is_junction", None)
@@ -114,9 +128,7 @@ def validate_force_target(target: Path, repo_root: Path = REPO_ROOT) -> None:
 
 def _source_paths(config: PublishConfig, repo_root: Path) -> dict[str, Path]:
     prompt_name = (
-        "prompt-to-play.md"
-        if config.workflow == "prompt-to-play"
-        else "runtime.md"
+        "prompt-to-play.md" if config.workflow == "prompt-to-play" else "runtime.md"
     )
     paths = {
         "asset_skill": repo_root / "asset-gen",
@@ -127,10 +139,11 @@ def _source_paths(config: PublishConfig, repo_root: Path) -> dict[str, Path]:
     }
     if config.workflow == "prompt-to-play":
         paths["workflow_resources"] = repo_root / "prompt_to_play"
-        paths["workflow_template"] = repo_root / "prompt_to_play" / "godot_template"
-        paths["example_world_spec"] = (
-            repo_root / "prompt_to_play" / "examples" / "world.json"
-        )
+        paths["workflow_template"] = repo_root / "prompt_to_play" / "direct_template"
+        for relative in PROMPT_TO_PLAY_RUNTIME_FILES:
+            paths[f"workflow_runtime:{relative}"] = (
+                paths["workflow_resources"] / relative
+            )
     return paths
 
 
@@ -174,6 +187,21 @@ def _copy_tree(
     )
 
 
+def _copy_selected_files(
+    source: Path,
+    destination: Path,
+    relative_paths: tuple[str, ...],
+) -> None:
+    """Copy an explicit runtime allowlist without carrying source-only modules."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for relative_text in relative_paths:
+        relative = Path(relative_text)
+        copied = destination / relative
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / relative, copied)
+
+
 def _copy_missing_tree(source: Path, destination: Path) -> None:
     """Add missing scaffold files without replacing anything user-owned."""
 
@@ -191,11 +219,7 @@ def _copy_missing_tree(source: Path, destination: Path) -> None:
         copied_exists = copied.exists() or copied.is_symlink()
         child_is_directory = child.is_dir() and not child.is_symlink()
         if copied_exists:
-            if (
-                child_is_directory
-                and copied.is_dir()
-                and not copied.is_symlink()
-            ):
+            if child_is_directory and copied.is_dir() and not copied.is_symlink():
                 _copy_missing_tree(child, copied)
             continue
         if child_is_directory:
@@ -302,17 +326,14 @@ def publish(config: PublishConfig, repo_root: Path = REPO_ROOT) -> Path:
         shutil.copy2(source["engine_guide"], staged_guide)
 
         staged_workflow = stage / "prompt_to_play"
-        staged_scaffold = stage / "godot_template"
+        staged_scaffold = stage / "direct_template"
         if config.workflow == "prompt-to-play":
-            _copy_tree(
+            _copy_selected_files(
                 source["workflow_resources"],
                 staged_workflow,
-                exclude=("godot_template",),
+                PROMPT_TO_PLAY_RUNTIME_FILES,
             )
             _copy_tree(source["workflow_template"], staged_scaffold)
-            staged_world_spec = staged_scaffold / "spec" / "world.json"
-            staged_world_spec.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source["example_world_spec"], staged_world_spec)
 
         if config.force and target.exists():
             print(f"Force: cleaning {target}")
@@ -360,7 +381,12 @@ def main(argv: list[str] | None = None) -> int:
             f"({config.workflow}) to: {target}"
         )
         publish(config)
-    except (FileNotFoundError, OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (
+        FileNotFoundError,
+        OSError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

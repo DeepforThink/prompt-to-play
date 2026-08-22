@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>PromptToPlay</AssemblyName>
-    <RootNamespace>PromptToPlay</RootNamespace>
+    <AssemblyName>PromptToPlayDirect</AssemblyName>
+    <RootNamespace>PromptToPlay.Direct</RootNamespace>
   </PropertyGroup>
 </Project>

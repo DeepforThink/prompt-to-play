@@ -1,125 +1,170 @@
-# Prompt-to-Play workflow
+# Prompt-to-Play direct generation workflow
 
-Prompt-to-Play is the Godot-specific, spec-driven workflow in this Godogen fork.
-It turns a natural-language description and optional reference images into a
-playable, explorable 3D world, then evaluates and selectively corrects that
-world. The floating mechanical city is a test fixture, not a built-in scene.
+Prompt-to-Play turns a natural-language game request and optional reference
+images directly into an editable, playable Godot project. The model authors
+Godot scenes, scripts, resources, and shaders below `generated/`. There is no
+WorldSpec, fixed entity graph, or scene-specific intermediate representation.
+
+The prompt shown in class is an example input, not a template. A hidden test may
+request a different setting, camera, mechanic, objective, art direction, or
+game genre; the same pipeline must generate the corresponding Godot source.
 
 ## External interface
 
 The user supplies only:
 
-1. a natural-language world description; and
-2. optional reference images.
+1. a non-empty natural-language game description; and
+2. zero or more optional reference images.
 
-The runtime derives the request hash and procedural seed. Generation time,
-model calls, token usage, scores, and reproducibility hashes are observations
-written after the run. Evaluation weights, score thresholds, and the correction
-limit belong to the versioned evaluation policy; they are not user inputs.
+The runtime hashes the prompt and ordered reference bytes and derives an
+internal seed. Generation time, model calls, Token usage, scores, and output
+hashes are measured after execution. Seed, time/Token budgets, evaluation
+weights, thresholds, and correction count are not fields the user must enter.
 
-## Pipeline
+Every run is written to a unique directory below
+`../output/generated/<request-hash>/run-<id>/`. Closing Godot does not remove
+the project. The selected revision can be reopened, edited, copied, and played
+without another API call.
+
+## Architecture
 
 ```text
-prompt + references
+prompt + ordered reference images
         |
         v
-WorldPlannerAgent (structured model API)
+ProjectGeneratorAgent (structured model API)
         |
         v
-validated WorldSpec
+direct-files JSON: generated/** scenes/scripts/resources/shaders
         |
         v
-AssetAgent -> image API -> Tripo3D API -> content-addressed GLB cache
+path + extension + size + code-capability safety gate
         |
         v
-Godot BuildExecutor (catalog assets first, primitive last fallback)
+trusted Godot harness + dotnet build
         |
         v
-structural checks -> fixed-camera capture -> VisualEvaluationAgent
+headless structure + input probe -> rendered capture -> VisualEvaluationAgent
         |                                      |
-        | accept                               | issues
+        | accepted                             | evidence-backed issues
         v                                      v
-  best-revision selection          RepairAgent -> revised WorldSpec
-                                                   |
-                                      host derives PatchSpec
-                                                   |
-                                                   +----> assets/build/capture
+candidate revision                    CodeRepairAgent
+                                               |
+                                      direct-files patch
+                                               |
+                                               +----> validate/build/capture
+
+all candidates -> accepted-first selection -> rebuild -> quality-gated play
 ```
 
-The three model roles have isolated contexts, role-specific model settings,
-strict JSON schemas, and trace entries. AssetAgent is a separate bounded tool
-worker with its own asset manifest rather than a fictitious model session. The
-visual evaluator cannot edit the world or
-decide Token, timing, or aggregate metrics. RepairAgent returns a complete
-candidate WorldSpec; the host validates it and deterministically derives only
-allowlisted stable-ID PatchSpec operations. A stale patch hash is rejected. The
-workflow keeps the best revision and permits at most two correction rounds
-after the initial build.
+The three model roles use isolated sessions and strict JSON outputs:
 
-## Generality boundary
+- **ProjectGeneratorAgent** converts the current raw prompt into a complete
+  `generated/**` file package. It must create
+  `generated/GeneratedGame.tscn` and the gameplay the prompt actually asks for.
+- **VisualEvaluationAgent** sees the original prompt, reference images, and
+  generated screenshots. It independently scores prompt fidelity, composition,
+  visual coherence, detail density, lighting/materials, and gameplay readability
+  and reports concrete issues. The host, not the model, derives the weighted
+  score and acceptance decision.
+- **CodeRepairAgent** receives bounded current generated source plus compiler,
+  structural, capture, and visual evidence. It returns a direct file patch,
+  not prose and not a replacement host project.
 
-The compiler supports different themes, layouts, region counts, roads,
-buildings, props, lights, cameras, and objective graphs. Interaction verbs are
-mapped onto a small reusable runtime vocabulary:
+The default run allows up to four correction revisions, with a hard internal
+ceiling of six and early exit as soon as every gate passes. An accepted revision
+always outranks a rejected revision, even when the rejected model score is
+higher. If a patch regresses or cycles, the host restores the best snapshot and
+verifies it with another build. If the correction ceiling is exhausted without
+acceptance, the project and evidence are preserved for inspection but the
+pipeline does not label or launch it as completed.
 
-- `collect`
-- `activate`
-- `repair`
-- `inspect`
-- a final reachable completion area
+## Trust boundary
 
-Objectives combine interactables with `all`, `any`, or `sequence`. Known
-logical prefab IDs are sent through AssetAgent. It first reuses the
-content-addressed cache and, when the host has explicitly enabled paid API
-generation, creates a reference image and converts it to a PBR GLB. Godot loads
-the strict catalog entry, while unresolved IDs receive a deterministic
-primitive fallback so a new prompt still produces a playable world instead of
-failing on a missing model. Its paid-attempt limit is shared by the full run,
-not reset for each correction revision.
+| Owner | Paths | Responsibility |
+| --- | --- | --- |
+| Repository host | `project.godot`, `.csproj`, `harness/**` | Stable entry point, build settings, structural evidence, screenshot capture |
+| Model | `generated/**` | Prompt-specific scene, mechanics, UI, code, resources, shaders |
+| Host evidence writer | `artifacts/runs/<run-id>/rev_<n>/**` | Immutable manifests, logs, reports, captures, Agent trace, selection |
+| Host reference publisher | `references/**` | Ordered copies of user-supplied reference images with verified hashes |
 
-Regions also drive a deterministic PCG decoration pass. Semantic region and
-theme tokens select vegetation, ruin, industrial, or generic primitive
-grammars; region area controls bounded density; and every derived item receives
-a child seed and stable manifest ID. Authored or generated prefabs can replace
-these fallbacks later without changing the interaction contract.
+The direct-files contract permits only normalized project-relative paths below
+`generated/`, an allowlist of text-based Godot/source extensions, and bounded
+file and total sizes. Before writing, it rejects path traversal, absolute or
+case-ambiguous paths, reserved device names, links/junctions, unsupported
+resource URLs, and generated code that attempts process execution, network or
+host-filesystem access, environment access, reflection, native interop, or
+unsafe C#. Application is atomic and followed by a source-tree hash check.
 
-This workflow targets prompt-conditioned, explorable 3D worlds with lightweight
-objectives. It does not claim to synthesize an arbitrary game genre or perform
-photorealistic multi-view 3D reconstruction. Reference images constrain style,
-palette, landmarks, and spatial relationships.
+This is a conservative static safety gate, not a claim that arbitrary generated
+code is harmless. Production deployment should also use an OS-level sandbox
+and least-privilege account.
 
-## Evaluation evidence
+## Trusted harness contract
 
-The six course metrics are represented directly:
+`project.godot` always launches `res://harness/Main.tscn`. The harness loads
+`res://generated/GeneratedGame.tscn`, waits two frames for generated scripts to
+create their nodes, and then checks:
 
-| Metric | Evidence |
+- the generated entry exists and instantiates;
+- at least one node is in the `ptp_gameplay` group;
+- visible 2D or 3D renderable content exists; and
+- one or two supported cameras are in `ptp_capture_camera`;
+- player, objective/progression, and visible HUD nodes are respectively in
+  `ptp_player`, `ptp_objective`, and `ptp_hud`; and
+- at least one `ptp_interaction_probe` node declares existing InputMap actions
+  in `ptp_probe_actions`, and synthesized input changes a trusted observable
+  transform, velocity, control/value/text, or `ptp_probe_state` value.
+
+A capture camera may set `capture_id` metadata. UI or debug overlays that
+should not appear in evaluation images may join `ptp_capture_hidden`.
+
+The Python host also appends a `host_process_completed` hard check after Godot
+exits; a report written before a crash or timeout cannot pass. `PTP_RUN_ID`,
+`PTP_REVISION`, and `PTP_PROJECT_SHA256` bind reports to an exact
+candidate. `PTP_AUTOMATION=1` runs the headless check and exits;
+`PTP_CAPTURE=1` runs under a rendering display driver, saves one or two PNGs,
+rejects empty/near-uniform frames, and records their hashes. These environment
+variables are operational evidence coordinates, not semantic generation
+inputs.
+
+## Evidence and rubric mapping
+
+Each revision retains the exact generated source snapshot and machine-readable
+evidence. Earlier revisions are never silently overwritten.
+
+| Course metric | Direct-pipeline evidence |
 | --- | --- |
-| Scene similarity | Fixed-camera images compared with the prompt/references |
-| Structural correctness | Load, graph, collision, navigation, and objective checks |
-| Automation loop | Versioned plan, evaluation, patch, rebuild, and selection records |
-| Generation speed | Measured stage and total elapsed time |
-| Token efficiency | Recorded model calls and input/output token counts |
-| Reproducibility | Exact Godot source hash on the first run; exact WorldSpec comparison with prior runs of the same request thereafter |
+| Scene similarity | Visual Agent comparison of prompt/references with hashed capture PNGs |
+| Structural correctness | Build result plus harness entry, gameplay, renderable, and camera checks |
+| Automation loop | Initial file manifest, per-revision patch/evaluation, immutable snapshots, and final selection |
+| Generation speed | Measured planning, publishing, restore, build, structural, capture, evaluation, and repair time |
+| Token efficiency | Per-role API input/output Token counts and model-call trace |
+| Reproducibility | Canonical request/seed, exact per-file and project hashes, and repeated-run comparison |
 
-Each run retains its request, every WorldSpec revision, asset catalog and rich
-asset manifest, build manifest, structural report, visual feedback, scored
-evaluation, patches, screenshots, best-revision selection, elapsed time, and
-per-agent model/Token trace. A good-looking screenshot cannot override a failed
-structural hard gate. Original reference images are attached before generated
-screenshots for both visual evaluation and repair, with explicit image counts
-so the evaluator can compare against the actual references rather than path
-names alone.
+An attractive screenshot cannot override a failed build or structural gate.
+Original references are attached before generated screenshots with explicit
+counts, so the visual and repair Agents compare actual image content rather
+than filenames.
 
-Operational `PTP_RUN_ID` and `PTP_REVISION` values only select immutable
-evidence directories; revision is restricted to the initial build plus two
-corrections. `PTP_CAPTURE=1` is likewise an execution switch rather than a
-semantic input. Capture mode visits every declared camera, rejects empty or
-near-uniform frames, and records resolution, renderer, and image hashes.
+For reproducibility, rerun the same canonical request and compare structural
+outcomes, visual scores, and source/capture hashes. Exact source identity is
+strong evidence when the provider is deterministic; when it is not, report the
+measured variation rather than claiming bit-for-bit equality.
 
-## Demonstrating that the compiler is not hardcoded
+## Acceptance demonstration
 
-The acceptance suite uses at least two semantically and visually different
-WorldSpecs, such as a floating mechanical city and a foggy forest ruin. Both
-must pass through the same compiler and interaction runtime. The same request
-and references must derive the same seed and stable manifest, while changed
-prompts must produce meaningfully different layouts and style parameters.
+Demonstrate at least:
+
+1. two semantically different prompts producing two distinct playable projects
+   through the same direct pipeline;
+2. one real compiler, structural, or visual issue causing a CodeRepairAgent
+   patch and reevaluation;
+3. best-revision restoration when a later candidate is worse; and
+4. a repeated request with request, generated-project, capture, timing, and
+   Token evidence available for comparison.
+
+The generated project—not a JSON plan—is the deliverable. The strongest demo
+opens the selected `project.godot`, plays the requested mechanic, shows the
+revision evidence, closes Godot, and reopens the same persistent project
+without calling the model again.

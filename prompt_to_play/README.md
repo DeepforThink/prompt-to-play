@@ -1,122 +1,141 @@
-# Prompt-to-Play contracts
+# Direct Prompt-to-Play runtime
 
-This directory defines small, versioned JSON contracts using only the Python
-standard library. They are engine-independent: Godot or another builder consumes
-the resolved `WorldSpec`.
+This package implements the default prompt-to-Godot pipeline. Its external
+input is one natural-language prompt plus zero or more reference images. The
+model directly authors Godot project files; no WorldSpec, fixed entity schema,
+or scene-specific intermediate representation is involved.
 
-## Contract boundary
+## Request boundary
 
-The only external user input is a prompt plus zero or more reference images:
+The canonical request records:
 
 ```json
-{"text": "...", "references": [{"path": "refs/a.png", "sha256": "..."}]}
+{"prompt":"...","references":[{"name":"reference.png","sha256":"..."}],"request_hash":"...","seed":123}
 ```
 
-Everything else in WorldSpec is planned by the system. In particular, `seed` is
-an internal field derived deterministically from the prompt and ordered reference
-image content hashes. Local filenames do not affect it. A caller cannot put
-budgets or evaluation weights in WorldSpec; those are rejected as unknown keys.
+Reference order is preserved because a prompt may explicitly refer to the
+first or second image. Local filenames do not affect the request hash or
+internally derived seed. Users are not asked for seed, time budget, Token
+budget, evaluation weights, threshold, or correction count. Timing, model and
+Token usage, scores, and hashes are measured outputs.
 
-`lifecycle.py create-request` hashes reference bytes, not machine-local names,
-and calls the same `derive_world_seed` function used by WorldSpec validation.
-Reference order is preserved because a prompt may refer to the first or second
-view explicitly.
+## Direct file contract
 
-## WorldSpec
+ProjectGeneratorAgent and CodeRepairAgent return
+`prompt-to-play/direct-files@1` JSON:
 
-Top-level fields are exactly:
-
-- `schema`, `world_id`, system-derived `seed`, `brief`
-- `style`, `units`
-- `regions`, `roads`, `buildings`, `props`, `lights`
-- `interactions`, `cameras`
-
-`style` is `{theme, palette, fog_density}`. Its palette is exactly
-`{sky, ground, primary, accent, emissive}`, with uppercase `#RRGGBB` colors.
-
-Buildings and props share
-`{id, region, prefab, position, rotation_deg, scale}`. Lights are
-`{id, kind, position, rotation_deg, color, energy, range}`, where kind is
-`directional`, `omni`, or `spot`.
-
-Interactions contain:
-
-- `player_spawn`: `{region, position}`
-- `interactables`: `{id, region, prefab, position, action, label, duration_ms}`;
-  action is `collect`, `activate`, `repair`, or `inspect`
-- `objectives`: `{id, rule, targets, completion_text}`; rule is `all`, `any`,
-  or `sequence`, and targets reference interactable IDs
-- `exit`: `{id, region, position, requires}`, where requires references objective
-  IDs rather than individual interactables
-
-`examples/world.json` is a mechanical city. `examples/forest_world.json` uses
-the same contract for a building-free luminous forest with inspect/repair
-actions and a sequence objective, demonstrating that the schema has no fixed
-three-core or mechanical-city assumption.
-
-## PatchSpec
-
-Patch fields are exactly `schema`, `patch_id`, `base_world_id`,
-`base_world_sha256`, `iteration`, `reasons`, `operations`, and
-`expected_checks`. Operations are `update`, `upsert`, `remove`, or
-`regenerate_region`. Targets use stable `kind + id`, never array indexes.
-
-Patchable kinds are `region`, `road`, `building`, `prop`, `light`,
-`interactable`, `objective`, `exit`, and `camera`. Each kind has an explicit
-field whitelist. Applying a patch verifies its canonical base hash, works on a
-deep copy, and validates every cross-reference again.
-
-## System evaluation policy
-
-`evaluation_policy.json` is fixed system policy, not user input. It contains:
-
-- `max_correction_iterations: 2`
-- generic `required_checks`
-- the six course metric `weights` and `min_score`
-- `normalization.reference_generation_ms` and
-  `normalization.reference_total_tokens`
-
-The six exact metrics are `scene_similarity`, `structural_correctness`,
-`automation_loop`, `generation_speed`, `token_efficiency`, and
-`reproducibility`.
-
-Generation time and tokens are recorded in Evaluation and converted to scores:
-
-```text
-generation_speed = min(1, reference_generation_ms / max(actual_total_ms, 1))
-token_efficiency = min(1, reference_total_tokens / max(actual_total_tokens, 1))
+```json
+{
+  "schema": "prompt-to-play/direct-files@1",
+  "files": [
+    {
+      "path": "generated/GeneratedGame.tscn",
+      "action": "upsert",
+      "content": "[gd_scene ...]"
+    },
+    {
+      "path": "generated/GeneratedGame.cs",
+      "action": "upsert",
+      "content": "using Godot; ..."
+    }
+  ]
+}
 ```
 
-They are not hard user-budget failures. Evaluation passes only when every
-reported hard check and every policy-required hard check passes, and the
-policy-weighted score reaches `min_score`. A failing report may request another
-patch only while below `max_correction_iterations`.
+`action` is `upsert`, `create`, `replace`, or `delete`; omitted action means
+`upsert`. Generation must create `generated/GeneratedGame.tscn`. Additional
+Godot scenes, C# or GDScript, resources, shaders, JSON, and Markdown may express
+whatever mechanics and visuals the current prompt requires.
 
-Evaluation fields are exactly `schema`, `run_id`, `world_id`, `world_sha256`,
-`iteration`, `status`, UTC timestamps, `timing_ms`, `tokens`, `checks`,
-`metrics`, `result`, `issues`, `artifacts`, and `next_action`.
+The host validates the complete response before applying it:
 
-## CLI
+- every path must be normalized, project-relative, and below `generated/`;
+- only `.godot`, `.cs`, `.gd`, `.tscn`, `.tres`, `.gdshader`, `.json`, and
+  `.md` are accepted;
+- file count, individual size, and total response size are bounded;
+- duplicate/case-ambiguous paths, traversal, absolute paths, reserved device
+  names, unsupported resource URLs, symlinks, and junctions are rejected;
+- generated scripts cannot execute processes, access the network or host
+  filesystem/environment, use reflection/native interop, or use unsafe C#;
+- writes are atomic and checked again after application.
+
+`apply_file_plan` produces a host-owned
+`prompt-to-play/direct-manifest@1` containing per-file hashes and a hash of the
+complete generated source tree. The manifest contains no prompt, credentials,
+or source text.
+
+This static gate is a deliberately conservative trust boundary. It does not
+claim to replace operating-system sandboxing for hostile code.
+
+## Trusted Godot host
+
+`direct_template/` is a Godot 4.7.x .NET project with a stable boundary:
+
+- `project.godot`, `PromptToPlayDirect.csproj`, and `harness/**` are trusted
+  files copied from the repository and never exposed to model patches;
+- `harness/Main.tscn` loads `res://generated/GeneratedGame.tscn`;
+- the generated scene marks playable content with the `ptp_gameplay` group and
+  provides one or two `Camera2D`/`Camera3D` nodes in
+  `ptp_capture_camera` for consistent evaluation;
+- player, objective/progression, and HUD nodes use `ptp_player`,
+  `ptp_objective`, and `ptp_hud`; a `ptp_interaction_probe` node declares
+  InputMap actions through `ptp_probe_actions`, allowing the host to verify a
+  real observable response to synthesized input;
+- the harness writes structure and capture evidence bound to `run_id`,
+  revision, and generated-project hash.
+
+Automation environment variables are operational evidence coordinates, not
+generation inputs:
+
+- `PTP_AUTOMATION=1` (or `PTP_VERIFY=1`) runs structural checks and exits;
+- `PTP_CAPTURE=1` captures evaluation screenshots;
+- `PTP_RUN_ID`, `PTP_REVISION`, and `PTP_PROJECT_SHA256` select and bind the
+  artifact directory.
+
+Artifacts are written below
+`artifacts/runs/<run-id>/rev_<n>/`. Previous revisions are not overwritten.
+
+## Agent loop
+
+1. ProjectGeneratorAgent receives the raw prompt, derived seed, references,
+   trusted-host contract, and direct-file JSON schema.
+2. The host validates and atomically applies `generated/**`.
+3. The host restores/builds the fixed .NET project and runs a headless Godot
+   structural check.
+4. On a valid build it verifies interaction and captures rendered views.
+   VisualEvaluationAgent scores prompt fidelity, composition, coherence,
+   detail, lighting/materials, and gameplay readability; host code computes the
+   weighted gate.
+5. CodeRepairAgent receives bounded generated source plus compiler, structural,
+   and visual evidence and returns another direct-file patch.
+6. The host repeats up to four repairs by default (hard ceiling six), stops
+   early on acceptance, restores and rebuilds the best accepted revision, and
+   launches it. If no revision passes, it preserves the best project and
+   evidence but reports failure instead of launching an unfinished game.
+
+The three roles have isolated model sessions and auditable timing/Token traces.
+Neither the runtime nor a generated project needs the Codex CLI.
+
+## Entry points
 
 From the repository root:
 
-```bash
-python prompt_to_play/contracts.py validate-world prompt_to_play/examples/world.json
-python prompt_to_play/contracts.py hash prompt_to_play/examples/world.json
-python prompt_to_play/contracts.py validate-patch prompt_to_play/examples/patch.json --world prompt_to_play/examples/world.json
-python prompt_to_play/contracts.py apply prompt_to_play/examples/world.json prompt_to_play/examples/patch.json generated/world.resolved.json
-python prompt_to_play/contracts.py validate-eval prompt_to_play/examples/evaluation.json --world generated/world.resolved.json --policy prompt_to_play/evaluation_policy.json
-python prompt_to_play/lifecycle.py create-request --prompt "a luminous forest" --reference refs/front.png --output request.json
-python prompt_to_play/lifecycle.py select-best artifacts/runs/r001/rev_0/evaluation.json artifacts/runs/r001/rev_1/evaluation.json --output artifacts/runs/r001/selection.json
+```powershell
+# Recommended: masked local API-key prompt
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
+
+# Environment is already configured
+python -m prompt_to_play.direct_pipeline
+
+# Static checks
+python -m pytest -q
 ```
 
-Canonical hashes use SHA-256 over UTF-8 JSON with sorted keys and compact
-separators. Contract paths are normalized repository-relative paths using `/`.
+Every successful run is persisted under
+`../output/generated/<request-hash>/run-<id>/`. Closing Godot does not remove
+the generated project. It can be reopened, edited, copied, or played without a
+new API call.
 
-The Godot runtime reads `PTP_RUN_ID` and `PTP_REVISION` as operational evidence
-coordinates; revision is restricted to `0`, `1`, or `2`. It writes manifests and
-structural reports under `artifacts/runs/<run-id>/rev_<n>/`. With
-`PTP_CAPTURE=1` in a rendered run, it visits all declared cameras, rejects empty
-or near-uniform images, and records each PNG's resolution and SHA-256 in
-`capture_manifest.json`. These environment variables do not alter WorldSpec or
-become user-facing generation parameters.
+Older schema-driven modules are retained only as archived implementation
+reference. They are not dependencies of `direct_pipeline.py` and are not
+installed into newly published Prompt-to-Play projects.

@@ -1,0 +1,30 @@
+Create a polished, fully playable 3D top-down rally racing game set in a snowy
+alpine valley. This is a presentation-ready vertical slice, not a grey-box
+prototype.
+
+The player drives a recognisable red rally car using WASD or the arrow keys.
+Implement acceleration, braking/reverse, steering, momentum, grip and mild
+drifting. The car must collide with snowbanks, barriers and scenery rather than
+passing through them. Use a smooth elevated follow camera that keeps the road
+ahead visible. The objective is to pass through six ordered checkpoints and
+finish one complete lap before a 90-second timer expires. Skipping a checkpoint
+must not count. Show speed, checkpoint/lap progress, remaining time, controls,
+and clear win/lose/restart state in a legible HUD.
+
+Build a winding closed mountain road with broad curves, elevation changes,
+lane-edge markings, start/finish markings, guard rails and snowbanks. Surround
+it with layered terrain, visible topographic contour-line styling, dense varied
+pine forests, rock outcrops, small cabins, signposts and distant mountain
+silhouettes. Model the rally car from multiple shaped parts with four visible
+wheels, windows, lights and a contrasting roof; do not represent it as a single
+box. Give checkpoints and hazards strong readable silhouettes without making
+them look like editor gizmos.
+
+Use a cohesive stylised low-poly art direction: cool blue-white snow, dark
+blue-green trees, warm cabin windows and saturated red/orange focal accents.
+Include directional shadows, soft fog, atmospheric depth, varied materials,
+subtle particles or snow trails, and composed foreground/midground/background
+layers. The two capture cameras should look like attractive real gameplay
+screenshots and immediately communicate racing, alpine scale and the objective.
+Avoid flat empty planes, default materials, isolated primitive test objects and
+debug-looking UI.
