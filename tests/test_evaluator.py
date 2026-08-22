@@ -15,20 +15,40 @@ def read_world():
     return json.loads(EXAMPLE_WORLD.read_text(encoding="utf-8"))
 
 
-def rejected_feedback(entity_id="pipe_cluster"):
+def camera_evaluation(score, camera_id="overview"):
     return {
-        "scene_similarity": 0.52,
-        "accepted": False,
+        "camera_id": camera_id,
+        "prompt_alignment": score,
+        "composition": score,
+        "lighting_materials": score,
+        "landmark_readability": score,
+        "camera_coverage": score,
+        "visible_defects": 1 - score,
+    }
+
+
+def rejected_observation(entity_id="pipe_cluster", camera_id="overview"):
+    return {
+        "camera_evaluations": [camera_evaluation(0.52, camera_id)],
         "issues": [
             {
                 "code": "flat_landmark",
                 "severity": "major",
                 "entity_id": entity_id,
+                "camera_id": camera_id,
                 "message": "The requested landmark is not visually recognisable.",
                 "suggested_fix": "Move and enlarge the landmark near the camera.",
             }
         ],
     }
+
+
+def rejected_feedback(entity_id="pipe_cluster", camera_id="overview"):
+    return evaluator.validate_visual_feedback(
+        rejected_observation(entity_id, camera_id),
+        read_world(),
+        expected_camera_ids=[camera_id],
+    )
 
 
 class FakeProvider:
@@ -59,13 +79,13 @@ class VisualEvaluationAgentTests(unittest.TestCase):
     def test_agent_sends_screenshots_and_returns_only_strict_visual_feedback(self):
         world = read_world()
         response = {
-            "scene_similarity": 0.86,
-            "accepted": True,
+            "camera_evaluations": [camera_evaluation(0.86)],
             "issues": [
                 {
                     "code": "minor_fog",
                     "severity": "minor",
                     "entity_id": None,
+                    "camera_id": "overview",
                     "message": "The skyline is slightly washed out.",
                     "suggested_fix": "Improve foreground contrast.",
                 }
@@ -92,7 +112,10 @@ class VisualEvaluationAgentTests(unittest.TestCase):
 
         self.assertEqual(agent.name, "VisualEvaluationAgent")
         self.assertEqual(agent.role, "visual_evaluator")
-        self.assertEqual(result, response)
+        self.assertEqual(result["camera_evaluations"], response["camera_evaluations"])
+        self.assertEqual(result["scene_similarity"], 0.86)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["issues"], response["issues"])
         self.assertEqual(len(provider.calls), 1)
         call = provider.calls[0]
         self.assertEqual(call["schema_name"], "prompt_to_play_visual_feedback")
@@ -102,7 +125,12 @@ class VisualEvaluationAgentTests(unittest.TestCase):
         self.assertFalse(call["json_schema"]["additionalProperties"])
         self.assertEqual(
             set(call["json_schema"]["properties"]),
-            {"scene_similarity", "accepted", "issues"},
+            {"camera_evaluations", "issues"},
+        )
+        self.assertEqual(
+            call["json_schema"]["properties"]["camera_evaluations"]["items"]
+            ["properties"]["camera_id"]["enum"],
+            ["overview"],
         )
         request = json.loads(call["messages"][1]["content"])
         self.assertEqual(request["agent"], "VisualEvaluationAgent")
@@ -114,38 +142,68 @@ class VisualEvaluationAgentTests(unittest.TestCase):
             request["attached_image_order"],
             "reference_images_then_rendered_screenshots",
         )
+        self.assertEqual(
+            request["screenshot_cameras"],
+            [{"camera_id": "overview", "attached_image_index": 2}],
+        )
+        self.assertNotIn("host_visual_gate", request)
         self.assertNotIn("timing_ms", request)
         self.assertNotIn("tokens", request)
         self.assertNotIn("weighted_score", request)
 
-    def test_host_rejects_model_acceptance_that_disagrees_with_visual_gate(self):
+    def test_model_cannot_submit_an_acceptance_decision(self):
         world = read_world()
-        feedback = {
-            "scene_similarity": 0.9,
-            "accepted": False,
-            "issues": [
-                {
-                    "code": "tiny_note",
-                    "severity": "minor",
-                    "entity_id": None,
-                    "message": "A small detail could improve.",
-                    "suggested_fix": "Add a decal.",
-                }
-            ],
-        }
-        with self.assertRaisesRegex(evaluator.EvaluatorError, "host visual gate"):
+        feedback = rejected_observation()
+        feedback["accepted"] = True
+        with self.assertRaisesRegex(evaluator.EvaluatorError, "unknown keys: accepted"):
             evaluator.validate_visual_feedback(feedback, world)
 
     def test_strict_feedback_rejects_metrics_and_unknown_entity_ids(self):
         world = read_world()
-        with_metric = copy.deepcopy(rejected_feedback())
+        with_metric = copy.deepcopy(rejected_observation())
         with_metric["tokens"] = {"total": 1}
         with self.assertRaisesRegex(evaluator.EvaluatorError, "unknown keys: tokens"):
             evaluator.validate_visual_feedback(with_metric, world)
 
-        unknown_entity = rejected_feedback("invented_by_model")
+        unknown_entity = rejected_observation("invented_by_model")
         with self.assertRaisesRegex(evaluator.EvaluatorError, "unknown WorldSpec entity"):
             evaluator.validate_visual_feedback(unknown_entity, world)
+
+    def test_host_requires_every_camera_and_penalizes_the_worst_view(self):
+        world = read_world()
+        observations = {
+            "camera_evaluations": [
+                camera_evaluation(1.0, "overview"),
+                camera_evaluation(0.5, "detail"),
+            ],
+            "issues": [
+                {
+                    "code": "detail_is_weak",
+                    "severity": "minor",
+                    "entity_id": None,
+                    "camera_id": "detail",
+                    "message": "The detail view is weak.",
+                    "suggested_fix": "Reframe the detail camera.",
+                }
+            ],
+        }
+        result = evaluator.validate_visual_feedback(
+            observations,
+            world,
+            min_scene_similarity=0.8,
+            expected_camera_ids=["overview", "detail"],
+        )
+        self.assertEqual(result["scene_similarity"], 0.675)
+        self.assertFalse(result["accepted"])
+
+        missing = copy.deepcopy(observations)
+        missing["camera_evaluations"].pop()
+        with self.assertRaisesRegex(evaluator.EvaluatorError, "missing cameras: detail"):
+            evaluator.validate_visual_feedback(
+                missing,
+                world,
+                expected_camera_ids=["overview", "detail"],
+            )
 
 
 class RepairAgentTests(unittest.TestCase):
@@ -225,7 +283,7 @@ class RepairAgentTests(unittest.TestCase):
                 evaluator.revise_world(
                     current["brief"]["text"],
                     current,
-                    rejected_feedback(),
+                    rejected_feedback(camera_id="shot"),
                     [screenshot],
                     provider=provider,
                     project_root=root,
@@ -237,7 +295,7 @@ class RepairAgentTests(unittest.TestCase):
                 evaluator.revise_world(
                     current["brief"]["text"],
                     current,
-                    rejected_feedback(),
+                    rejected_feedback(camera_id="shot"),
                     [screenshot],
                     provider=FakeProvider(disconnected),
                     project_root=root,
@@ -255,7 +313,7 @@ class RepairAgentTests(unittest.TestCase):
             result, patch = agent.repair(
                 current["brief"]["text"],
                 current,
-                rejected_feedback(),
+                rejected_feedback(camera_id="shot"),
                 [screenshot],
                 iteration=1,
             )

@@ -9,8 +9,9 @@ The floating mechanical city in `prompt_to_play/examples/` is only one acceptanc
 - A versioned, engine-independent `WorldSpec`, `PatchSpec`, evaluation policy, and validator.
 - A reusable Godot 4.7 C# scaffold that builds regions, roads, buildings, props, lights, fixed cameras, generic interactables, objectives, and a reachable exit from data.
 - A desktop launcher where the player enters an arbitrary prompt and optional reference images, then watches Plan -> Validate -> Publish -> Build -> Play run off the UI thread.
-- An API-first multi-agent runtime with three isolated model roles—WorldPlanner, VisualEvaluation, and Repair—using strict JSON hand-offs, per-call hashes, timing, model, and Token traces.
-- A separate AssetAgent tool worker that turns semantic prefab requests into cached API-generated GLBs, plus a strict Godot catalog and deterministic primitive fallback when an asset is unresolved.
+- An API-first multi-agent runtime with isolated WorldPlanner, WorldRefinement, VisualEvaluation, and Repair roles, including per-task provider instances, strict JSON hand-offs, hashes, timing, model, and Token traces.
+- A host-derived refinement DAG that repeatedly fans out layout, gameplay, and lighting/camera Subagents, merges only owned stable-ID updates, and stops on convergence or a bounded iteration cap.
+- Bounded AssetAgent workers that resolve unique semantic prefabs concurrently into cached API-generated GLBs, followed by host-ordered catalog publication and deterministic primitive fallback when an asset is unresolved.
 - A Godot PrefabResolver that loads real `.glb`/`.gltf` scenes, enables shadows and collision, and records whether each entity used a catalog asset or fallback geometry.
 - WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
 - Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
@@ -42,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -I
 ```
 
 The launcher defaults to Micu's OpenAI Responses-compatible endpoint and all
-three model roles use `gpt-5.6-sol`; override the model with `-Model <model-id>`.
+model roles use `gpt-5.6-sol`; override the model with `-Model <model-id>`.
 Use `-ApiProvider openai` only when the official OpenAI endpoint is intended.
 To run with only the model API and accept primitive asset fallbacks, add
 `-AssetMode off`; that mode prompts for only the selected provider's key.
@@ -108,18 +109,24 @@ Then give the host Agent the actual world prompt and any references. Its publish
 
 ```text
 prompt + optional references
-        -> Plan and validate WorldSpec
+        -> WorldPlanner produces one complete WorldSpec
+        -> Host repeatedly fans out bounded refinement tasks until convergence
         -> Execute deterministic Godot compiler
         -> Evaluate structure and fixed-camera evidence
-        -> Feedback Agent emits accept/patch/rollback/stop
-        -> Rebuild and select best revision
+        -> Visual Agent emits per-camera observations
+        -> Host derives aggregate score, acceptance, and a validated repair patch
+        -> Rebuild and select a passing revision, or stop without launching
 ```
 
-Headless execution writes the build manifest and structural report to
+The run root records `refinement.json` with the Planner hash, every refinement
+round, task ownership, status, duration, candidate/patch hashes, merged patch,
+and convergence reason. `agent_trace.json` identifies every model call by role,
+instance, and task. Headless execution writes the build manifest and structural report to
 `artifacts/runs/<run-id>/rev_<n>/`. Capture mode visits every WorldSpec camera,
 rejects empty or near-uniform frames, writes PNGs, and records their SHA-256
 digests in `capture_manifest.json`. Set `PTP_REVISION` to `1` or `2` only after
-a validated feedback patch; earlier evidence remains untouched.
+a validated feedback patch; earlier evidence remains untouched. A generated
+project is launched only when the selected revision passes every hard gate.
 
 ## Contracts and tests
 
@@ -141,6 +148,7 @@ CPU-only execution is sufficient for contract validation, compilation, headless 
 - `prompt_to_play/provider.py` — Codex CLI and OpenAI-compatible structured-output adapters.
 - `prompt_to_play/agents.py` — isolated API-agent sessions, role-specific models, Token accounting, and auditable traces.
 - `prompt_to_play/planner.py` — arbitrary prompt/reference planning into a validated WorldSpec.
+- `prompt_to_play/refinement.py` — fixed refinement DAG, ownership enforcement, convergence, and iteration records.
 - `prompt_to_play/assets.py` — AssetAgent requests, paid API opt-in, content-addressed GLB cache, catalog, and manifest.
 - `prompt_to_play/evaluator.py` — VisualEvaluationAgent, RepairAgent, and deterministic WorldSpec-to-PatchSpec diff.
 - `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.

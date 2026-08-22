@@ -104,6 +104,98 @@ class PipelineStageTests(unittest.TestCase):
             )
             self.assertNotIn(str(workspace), json.dumps(captured["references"]))
 
+    def test_default_planner_fans_out_refiners_and_persists_iteration_record(self):
+        class PlannerProvider:
+            def generate_json(self, *_args, **_kwargs):
+                return {}
+
+        class RefinementProvider:
+            def generate_json(self, messages, **_kwargs):
+                payload = json.loads(messages[-1]["content"])
+                return copy.deepcopy(payload["current_world"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace, source_repo, output_root, _image = self.make_layout(temporary)
+
+            def fake_default_plan(
+                prompt,
+                references,
+                *,
+                provider,
+                **_kwargs,
+            ):
+                provider.generate_json(
+                    [{"role": "user", "content": "plan"}],
+                    json_schema={"type": "object"},
+                    schema_name="world",
+                )
+                return planned_world(prompt, references)
+
+            runtime_factory = lambda repo, _environment: agents.MultiAgentRuntime(
+                repo,
+                provider_factory=lambda role, *_args: (
+                    RefinementProvider()
+                    if role == agents.AgentRole.WORLD_REFINER
+                    else PlannerProvider()
+                ),
+            )
+
+            def fake_publish(target):
+                (target / "spec").mkdir(parents=True)
+                return target
+
+            with patch.object(pipeline.planner, "plan_world", fake_default_plan):
+                stages = pipeline.PipelineStages(
+                    pipeline.PipelineDependencies(
+                        source_repo_root=source_repo,
+                        output_root=output_root,
+                        environment={"PROMPT_TO_PLAY_ASSET_MODE": "off"},
+                        publish_project=fake_publish,
+                        agent_runtime_factory=runtime_factory,
+                    )
+                )
+            state = PipelineState(LaunchRequest.from_values("并行规划的森林遗迹"))
+            stages.plan(state, lambda _message: None)
+            stages.validate(state, lambda _message: None)
+            stages.publish(state, lambda _message: None)
+
+            record = state.require_result(pipeline.REFINEMENT_RESULT)
+            first_round = record["rounds"][0]
+            self.assertEqual(
+                [task["task_id"] for task in first_round["tasks"]],
+                [
+                    "refine_01_layout",
+                    "refine_01_gameplay",
+                    "refine_01_lighting_camera",
+                ],
+            )
+            self.assertEqual(
+                [task["status"] for task in first_round["tasks"]],
+                ["noop", "noop", "noop"],
+            )
+            project = state.require_result(pipeline.PROJECT_RESULT)
+            run_id = state.require_result(pipeline.REQUEST_RESULT)["request_hash"][:12]
+            artifact_root = project / "artifacts" / "runs" / run_id
+            persisted = json.loads(
+                (artifact_root / "refinement.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(persisted["run_id"], run_id)
+            self.assertEqual(persisted["planner"]["iteration"], 0)
+            self.assertEqual(persisted["termination_reason"], "converged")
+            trace = json.loads(
+                (artifact_root / "agent_trace.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(trace["schema"], agents.TRACE_SCHEMA)
+            self.assertEqual(trace["calls"][0]["role"], "world_planner")
+            self.assertEqual(
+                {call["task_id"] for call in trace["calls"][1:]},
+                {
+                    "refine_01_layout",
+                    "refine_01_gameplay",
+                    "refine_01_lighting_camera",
+                },
+            )
+
     def test_validate_uses_the_contract_dependency(self):
         checked = []
 
@@ -447,23 +539,47 @@ class PipelineStageTests(unittest.TestCase):
                 self.image_paths.append(list(kwargs["image_paths"]))
                 if self.calls == 1:
                     return {
-                        "scene_similarity": 0.5,
-                        "accepted": False,
+                        "camera_evaluations": [
+                            {
+                                "camera_id": "overview",
+                                "prompt_alignment": 0.5,
+                                "composition": 0.5,
+                                "lighting_materials": 0.5,
+                                "landmark_readability": 0.5,
+                                "camera_coverage": 0.5,
+                                "visible_defects": 0.5,
+                            }
+                        ],
                         "issues": [
                             {
                                 "code": "landmark_too_small",
                                 "severity": "major",
                                 "entity_id": None,
+                                "camera_id": "overview",
                                 "message": "The main landmark is visually weak.",
                                 "suggested_fix": "Move the first building closer to the overview camera.",
                             }
                         ],
                     }
                 return {
-                    "scene_similarity": 0.9,
-                    "accepted": True,
+                    "camera_evaluations": [
+                        {
+                            "camera_id": "overview",
+                            "prompt_alignment": 0.9,
+                            "composition": 0.9,
+                            "lighting_materials": 0.9,
+                            "landmark_readability": 0.9,
+                            "camera_coverage": 0.9,
+                            "visible_defects": 0.1,
+                        }
+                    ],
                     "issues": [],
                 }
+
+        class RefinementProvider:
+            def generate_json(self, messages, **_kwargs):
+                payload = json.loads(messages[-1]["content"])
+                return copy.deepcopy(payload["current_world"])
 
         class RepairProvider:
             payloads = []
@@ -505,14 +621,20 @@ class PipelineStageTests(unittest.TestCase):
                 agents.AgentRole.VISUAL_EVALUATOR: VisualProvider(),
                 agents.AgentRole.REPAIR: RepairProvider(),
             }
+            refinement_providers = []
+
+            def provider_factory(role, _environment, _repo):
+                if role == agents.AgentRole.WORLD_REFINER:
+                    provider = RefinementProvider()
+                    refinement_providers.append(provider)
+                    return provider
+                return role_providers[role]
 
             def runtime_factory(repo, environment):
                 return agents.MultiAgentRuntime(
                     repo,
                     environment=environment,
-                    provider_factory=lambda role, _environment, _repo: role_providers[
-                        role
-                    ],
+                    provider_factory=provider_factory,
                 )
 
             def fake_publish(target):
@@ -688,6 +810,7 @@ class PipelineStageTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(repair_payload["reference_image_count"], 1)
+            self.assertEqual(len(refinement_providers), 3)
             trace = json.loads(
                 (project / "artifacts" / "runs" / run_id / "agent_trace.json").read_text(
                     encoding="utf-8"
@@ -695,7 +818,15 @@ class PipelineStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 [call["role"] for call in trace["calls"]],
-                ["world_planner", "visual_evaluator", "repair", "visual_evaluator"],
+                [
+                    "world_planner",
+                    "world_refiner",
+                    "world_refiner",
+                    "world_refiner",
+                    "visual_evaluator",
+                    "repair",
+                    "visual_evaluator",
+                ],
             )
             future_project = project.parent / "run-ffffffffffff"
             future_project.mkdir()
@@ -705,6 +836,19 @@ class PipelineStageTests(unittest.TestCase):
                     {contracts.document_sha256(state.require_result(pipeline.WORLD_RESULT))}
                 ),
             )
+
+    def test_promotion_gate_refuses_to_launch_a_best_failing_revision(self):
+        selection_path = Path("artifacts/runs/run/selection.json")
+        with self.assertRaisesRegex(
+            pipeline.PipelineIntegrationError,
+            "no revision passed all evaluation gates.*revision 2",
+        ):
+            pipeline._require_passing_selection(
+                {"result": {"passed": False}}, 2, selection_path
+            )
+        pipeline._require_passing_selection(
+            {"result": {"passed": True}}, 1, selection_path
+        )
 
 
 class SubprocessBoundaryTests(unittest.TestCase):

@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -106,6 +108,7 @@ class AssetConfigurationTests(unittest.TestCase):
         default = assets.AssetAgentConfig.from_environment({})
         self.assertEqual(default.mode, "off")
         self.assertEqual(default.max_generations, 3)
+        self.assertEqual(default.max_workers, 4)
         self.assertEqual(default.image_model, "grok")
 
         gemini = assets.AssetAgentConfig.from_environment(
@@ -125,6 +128,9 @@ class AssetConfigurationTests(unittest.TestCase):
             {"PROMPT_TO_PLAY_ASSET_MODE": "sometimes"},
             {"PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS": "many"},
             {"PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS": "13"},
+            {"PROMPT_TO_PLAY_ASSET_MAX_WORKERS": "many"},
+            {"PROMPT_TO_PLAY_ASSET_MAX_WORKERS": "0"},
+            {"PROMPT_TO_PLAY_ASSET_MAX_WORKERS": "5"},
             {"PROMPT_TO_PLAY_ASSET_IMAGE_MODEL": "unknown"},
         )
         for environment in bad_environments:
@@ -271,8 +277,8 @@ class AssetAgentTests(unittest.TestCase):
             self.assertEqual(result.generated_assets, 2)
             self.assertEqual(len(runner.calls), 4)
             self.assertEqual(
-                [call[0][2] for call in runner.calls],
-                ["image", "glb", "image", "glb"],
+                sorted(call[0][2] for call in runner.calls),
+                ["glb", "glb", "image", "image"],
             )
             for _command, _cwd, child_environment in runner.calls:
                 self.assertNotIn("OPENAI_API_KEY", child_environment)
@@ -294,6 +300,106 @@ class AssetAgentTests(unittest.TestCase):
             )
             self.assertNotIn("xai-secret", "\n".join(logs))
             self.assertNotIn("tripo-secret", "\n".join(logs))
+
+    def test_generation_concurrency_respects_host_worker_cap(self):
+        class TrackingRunner(FakeAssetRunner):
+            def __init__(self):
+                super().__init__()
+                self.lock = threading.Lock()
+                self.active = 0
+                self.peak = 0
+
+            def __call__(self, argv, cwd, environment):
+                with self.lock:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                try:
+                    time.sleep(0.03)
+                    return super().__call__(argv, cwd, environment)
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source, cache, project = self.make_layout(temporary)
+            runner = TrackingRunner()
+            agent, _messages = self.make_agent(
+                source,
+                cache,
+                environment={
+                    "PROMPT_TO_PLAY_ASSET_MODE": "auto",
+                    "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS": "4",
+                    "PROMPT_TO_PLAY_ASSET_MAX_WORKERS": "2",
+                    "XAI_API_KEY": "x",
+                    "TRIPO3D_API_KEY": "t",
+                },
+                runner=runner,
+            )
+
+            result = agent.run(WORLD, project)
+
+            self.assertEqual(result.attempted_generations, 4)
+            self.assertEqual(result.generated_assets, 4)
+            self.assertEqual(runner.peak, 2)
+            self.assertEqual(result.manifest["policy"]["max_parallel_workers"], 2)
+
+    def test_manifest_order_is_stable_when_workers_finish_out_of_order(self):
+        requests = assets.derive_asset_requests(WORLD)
+        first_key = requests[0].cache_key
+
+        class ReverseCompletionRunner(FakeAssetRunner):
+            def __init__(self):
+                super().__init__()
+                self.completions = []
+                self.lock = threading.Lock()
+                self.later_finished = threading.Event()
+
+            def __call__(self, argv, cwd, environment):
+                command = list(argv)
+                output = Path(command[command.index("-o") + 1])
+                cache_key = output.parent.name
+                if cache_key == first_key and "image" in command:
+                    if not self.later_finished.wait(timeout=2):
+                        raise AssertionError("another asset did not finish concurrently")
+                result = super().__call__(argv, cwd, environment)
+                if "glb" in command or "resume" in command:
+                    with self.lock:
+                        self.completions.append(cache_key)
+                    if cache_key != first_key:
+                        self.later_finished.set()
+                return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source, cache, project = self.make_layout(temporary)
+            runner = ReverseCompletionRunner()
+            agent, _messages = self.make_agent(
+                source,
+                cache,
+                environment={
+                    "PROMPT_TO_PLAY_ASSET_MODE": "auto",
+                    "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS": "4",
+                    "PROMPT_TO_PLAY_ASSET_MAX_WORKERS": "4",
+                    "XAI_API_KEY": "x",
+                    "TRIPO3D_API_KEY": "t",
+                },
+                runner=runner,
+            )
+
+            result = agent.run(WORLD, project)
+
+            expected_prefabs = [request.prefab for request in requests]
+            self.assertNotEqual(
+                runner.completions,
+                [request.cache_key for request in requests],
+            )
+            self.assertEqual(
+                [item["prefab"] for item in result.manifest["assets"]],
+                expected_prefabs,
+            )
+            self.assertEqual(
+                [item["prefab"] for item in result.catalog["assets"]],
+                expected_prefabs,
+            )
 
     def test_generated_cache_is_reused_without_credentials_or_api_calls(self):
         with tempfile.TemporaryDirectory() as temporary:

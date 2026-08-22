@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 try:  # Support package imports and direct local execution.
-    from . import agents, assets, contracts, evaluator, lifecycle, planner
+    from . import agents, assets, contracts, evaluator, lifecycle, planner, refinement
     from .launcher import LogSink, PipelineCommands, PipelineState, run_launcher
 except ImportError:  # pragma: no cover - direct script execution only
     import agents
@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - direct script execution only
     import evaluator
     import lifecycle
     import planner
+    import refinement
     from launcher import LogSink, PipelineCommands, PipelineState, run_launcher
 
 
@@ -50,6 +51,7 @@ STRUCTURAL_REPORT_RESULT = "structural_report"
 PROCESS_RESULT = "godot_process"
 AGENT_RUNTIME_RESULT = "multi_agent_runtime"
 ASSET_RESULTS_RESULT = "asset_agent_results"
+REFINEMENT_RESULT = "refinement"
 EVALUATIONS_RESULT = "evaluations"
 SELECTED_REVISION_RESULT = "selected_revision"
 TIMING_RESULT = "timing_ms"
@@ -140,6 +142,7 @@ class PipelineDependencies:
     start_process: ProcessStarter | None = None
     agent_runtime_factory: AgentRuntimeFactory | None = None
     orchestrate_assets: Callable[..., assets.AssetAgentResult] | None = None
+    refine_world: Callable[..., refinement.RefinementRun] | None = None
     launch_probe_seconds: float = 1.25
     which: Callable[[str], str | None] = shutil.which
 
@@ -499,6 +502,19 @@ def _build_evaluation_report(
     return report
 
 
+def _require_passing_selection(
+    evaluation: Mapping[str, Any],
+    revision: int,
+    selection_path: Path,
+) -> None:
+    result = evaluation.get("result")
+    if not isinstance(result, Mapping) or result.get("passed") is not True:
+        raise PipelineIntegrationError(
+            "no revision passed all evaluation gates; refusing to launch the "
+            f"best failing revision {revision}; selection: {selection_path}"
+        )
+
+
 def _load_source_publisher() -> Any:
     """Load the repository publisher by its anchored path, never by CWD name lookup."""
 
@@ -827,6 +843,11 @@ class PipelineStages:
             if dependencies.orchestrate_assets is None
             else dependencies.orchestrate_assets
         )
+        self.refine_world = (
+            refinement.refine_world
+            if dependencies.refine_world is None
+            else dependencies.refine_world
+        )
         self.launch_probe_seconds = max(0.0, float(dependencies.launch_probe_seconds))
         self.which = dependencies.which
 
@@ -865,6 +886,41 @@ class PipelineStages:
                 reference_image_paths=state.request.reference_images,
                 project_root=self.source_repo_root,
                 provider=runtime.agent(agents.AgentRole.WORLD_PLANNER),
+            )
+            log("Host Orchestrator：分发 layout、gameplay、lighting/camera Subagent")
+            try:
+                refinement_run = self.refine_world(
+                    runtime,
+                    state.request.prompt,
+                    world,
+                    reference_image_paths=state.request.reference_images,
+                    project_root=self.source_repo_root,
+                    max_workers=refinement.refinement_max_workers(self.environment),
+                    max_iterations=refinement.refinement_max_iterations(
+                        self.environment
+                    ),
+                )
+            except ValueError as exc:
+                raise PipelineIntegrationError(
+                    f"World refinement configuration failed: {exc}"
+                ) from exc
+            world = refinement_run.world
+            state.set_result(
+                REFINEMENT_RESULT, copy.deepcopy(dict(refinement_run.record))
+            )
+            round_statuses = []
+            for round_record in refinement_run.record["rounds"]:
+                task_statuses = ", ".join(
+                    f"{task['task_id']}={task['status']}"
+                    for task in round_record["tasks"]
+                )
+                round_statuses.append(
+                    f"round {round_record['iteration']}: {task_statuses}"
+                )
+            log(
+                "Host Orchestrator：Subagent 迭代完成（"
+                + "; ".join(round_statuses)
+                + f"；{refinement_run.record['termination_reason']}）"
             )
         else:
             world = self.plan_world(
@@ -951,6 +1007,17 @@ class PipelineStages:
         request_path.write_bytes(
             contracts.canonical_json_bytes(request_document) + b"\n"
         )
+        refinement_record = state.results.get(REFINEMENT_RESULT)
+        if isinstance(refinement_record, Mapping):
+            persisted_refinement = copy.deepcopy(dict(refinement_record))
+            persisted_refinement["run_id"] = run_id
+            persisted_refinement["request_hash"] = request_document["request_hash"]
+            (request_path.parent / "refinement.json").write_bytes(
+                contracts.canonical_json_bytes(persisted_refinement) + b"\n"
+            )
+        runtime = state.results.get(AGENT_RUNTIME_RESULT)
+        if isinstance(runtime, agents.MultiAgentRuntime):
+            runtime.write_trace(request_path.parent / "agent_trace.json", run_id=run_id)
 
         asset_started = time.perf_counter()
         asset_result = self.orchestrate_assets(
@@ -1462,13 +1529,10 @@ class PipelineStages:
             run_id=run_id,
         )
         selected_evaluation = evaluations[selected_revision][1]
-        if selected_evaluation["result"]["passed"]:
-            log(f"已选择通过全部评价门槛的修订 {selected_revision}：{selection_path}")
-        else:
-            log(
-                f"评价阈值内没有通过版本；保留最佳可玩修订 {selected_revision}："
-                f"{selection_path}"
-            )
+        _require_passing_selection(
+            selected_evaluation, selected_revision, selection_path
+        )
+        log(f"已选择通过全部评价门槛的修订 {selected_revision}：{selection_path}")
 
     def launch(self, state: PipelineState, log: LogSink) -> None:
         project_dir = Path(state.require_result(PROJECT_RESULT)).resolve(strict=True)

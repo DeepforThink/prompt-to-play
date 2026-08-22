@@ -13,6 +13,8 @@ only by host environment policy:
     ``off`` (default), ``auto``, or ``required``.
 ``PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS``
     System-owned per-run API attempt budget (default 3, hard-capped at 12).
+``PROMPT_TO_PLAY_ASSET_MAX_WORKERS``
+    Maximum concurrent unique-prefab generations (default and hard cap 4).
 ``PROMPT_TO_PLAY_ASSET_IMAGE_MODEL``
     Optional ``grok`` or ``gemini`` override.
 """
@@ -25,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -41,12 +44,15 @@ REQUEST_RECIPE_VERSION = "prompt-to-play/asset-request@1"
 
 ASSET_MODE_ENV = "PROMPT_TO_PLAY_ASSET_MODE"
 ASSET_MAX_GENERATIONS_ENV = "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS"
+ASSET_MAX_WORKERS_ENV = "PROMPT_TO_PLAY_ASSET_MAX_WORKERS"
 ASSET_IMAGE_MODEL_ENV = "PROMPT_TO_PLAY_ASSET_IMAGE_MODEL"
 ASSET_PYTHON_ENV = "PROMPT_TO_PLAY_ASSET_PYTHON"
 
 DEFAULT_ASSET_MODE = "off"
 DEFAULT_MAX_GENERATIONS = 3
+DEFAULT_MAX_WORKERS = 4
 HARD_MAX_GENERATIONS = 12
+HARD_MAX_WORKERS = 4
 VALID_ASSET_MODES = frozenset({"off", "auto", "required"})
 VALID_IMAGE_MODELS = frozenset({"grok", "gemini"})
 
@@ -123,6 +129,7 @@ class AssetAgentConfig:
 
     mode: str
     max_generations: int
+    max_workers: int
     image_model: str
     python_executable: str
 
@@ -152,6 +159,21 @@ class AssetAgentConfig:
                 f"{HARD_MAX_GENERATIONS}"
             )
 
+        raw_workers = env.get(
+            ASSET_MAX_WORKERS_ENV, str(DEFAULT_MAX_WORKERS)
+        ).strip()
+        try:
+            max_workers = int(raw_workers)
+        except ValueError as exc:
+            raise AssetConfigurationError(
+                f"{ASSET_MAX_WORKERS_ENV} must be an integer"
+            ) from exc
+        if not 1 <= max_workers <= HARD_MAX_WORKERS:
+            raise AssetConfigurationError(
+                f"{ASSET_MAX_WORKERS_ENV} must be between 1 and "
+                f"{HARD_MAX_WORKERS}"
+            )
+
         configured_model = env.get(ASSET_IMAGE_MODEL_ENV, "").strip().lower()
         if configured_model and configured_model not in VALID_IMAGE_MODELS:
             raise AssetConfigurationError(
@@ -165,6 +187,7 @@ class AssetAgentConfig:
         return cls(
             mode=mode,
             max_generations=max_generations,
+            max_workers=max_workers,
             image_model=image_model,
             python_executable=python_executable,
         )
@@ -179,6 +202,15 @@ class AssetRequest:
     prompt: str
     cache_key: str
     priority: int
+
+
+@dataclass(frozen=True)
+class _AssetWorkItem:
+    request: AssetRequest
+    action: str
+    model_path: Path | None = None
+    error: str | None = None
+    attempt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -515,6 +547,56 @@ def _catalog_entry(
     }
 
 
+def _plan_asset_work(
+    requests: Sequence[AssetRequest],
+    *,
+    config: AssetAgentConfig,
+    cache_root: Path,
+    missing_credentials: Sequence[str],
+) -> tuple[_AssetWorkItem, ...]:
+    """Classify requests and reserve the paid-attempt budget in stable order."""
+
+    work: list[_AssetWorkItem] = []
+    reserved = 0
+    for request in requests:
+        cached_model = cache_root / request.cache_key / "model.glb"
+        if _usable_glb(cached_model):
+            work.append(
+                _AssetWorkItem(request, "publish-cache", model_path=cached_model)
+            )
+        elif config.mode == "off":
+            work.append(
+                _AssetWorkItem(
+                    request,
+                    "unresolved",
+                    error="asset API mode is off and no cached GLB exists",
+                )
+            )
+        elif missing_credentials:
+            work.append(
+                _AssetWorkItem(
+                    request,
+                    "unresolved",
+                    error="missing credentials: " + ", ".join(missing_credentials),
+                )
+            )
+        elif reserved < config.max_generations:
+            reserved += 1
+            work.append(_AssetWorkItem(request, "generate", attempt=reserved))
+        else:
+            work.append(
+                _AssetWorkItem(
+                    request,
+                    "unresolved",
+                    error=(
+                        "system API generation limit reached "
+                        f"({config.max_generations})"
+                    ),
+                )
+            )
+    return tuple(work)
+
+
 class AssetAgent:
     """Resolve semantic asset requests and emit the PrefabResolver catalog."""
 
@@ -545,17 +627,50 @@ class AssetAgent:
             world_spec, image_model=self.config.image_model
         )
         missing_credentials = _missing_credentials(self.config, self.environment)
-        attempted = 0
+        work = _plan_asset_work(
+            requests,
+            config=self.config,
+            cache_root=self.cache_root,
+            missing_credentials=missing_credentials,
+        )
+        attempted = sum(item.action == "generate" for item in work)
         generated = 0
         cache_hits = 0
         entries: list[dict[str, Any]] = []
 
-        for request in requests:
-            cached_model = self.cache_root / request.cache_key / "model.glb"
-            if _usable_glb(cached_model):
+        generation_futures: dict[str, Future[Path]] = {}
+        generation_work = [item for item in work if item.action == "generate"]
+        if generation_work:
+            with ThreadPoolExecutor(
+                max_workers=min(self.config.max_workers, len(generation_work)),
+                thread_name_prefix="asset-subagent",
+            ) as executor:
+                for item in generation_work:
+                    request = item.request
+                    self.log(
+                        f"AssetAgent API request {item.attempt}/"
+                        f"{self.config.max_generations}: {request.prefab}"
+                    )
+                    generation_futures[request.cache_key] = executor.submit(
+                        _generate_to_cache,
+                        request,
+                        config=self.config,
+                        source_repo_root=self.source_repo_root,
+                        cache_root=self.cache_root,
+                        environment=self.environment,
+                        runner=self.command_runner,
+                    )
+
+        # Workers only populate isolated content-cache directories. Publishing,
+        # counters, logging, and catalog construction remain host-owned and stable.
+        for item in work:
+            request = item.request
+            if item.action == "publish-cache":
+                if item.model_path is None:
+                    raise RuntimeError("cached asset work item has no model path")
                 try:
                     scene_path, digest = _publish_cached_asset(
-                        cached_model, project, request.cache_key
+                        item.model_path, project, request.cache_key
                     )
                     entries.append(
                         _catalog_entry(
@@ -582,7 +697,7 @@ class AssetAgent:
                     )
                 continue
 
-            if self.config.mode == "off":
+            if item.action == "unresolved":
                 entries.append(
                     _catalog_entry(
                         request,
@@ -590,54 +705,13 @@ class AssetAgent:
                         sha256=None,
                         source="none",
                         status="unresolved",
-                        error="asset API mode is off and no cached GLB exists",
+                        error=item.error,
                     )
                 )
                 continue
 
-            if missing_credentials:
-                entries.append(
-                    _catalog_entry(
-                        request,
-                        scene_path=None,
-                        sha256=None,
-                        source="none",
-                        status="unresolved",
-                        error="missing credentials: " + ", ".join(missing_credentials),
-                    )
-                )
-                continue
-
-            if attempted >= self.config.max_generations:
-                entries.append(
-                    _catalog_entry(
-                        request,
-                        scene_path=None,
-                        sha256=None,
-                        source="none",
-                        status="unresolved",
-                        error=(
-                            "system API generation limit reached "
-                            f"({self.config.max_generations})"
-                        ),
-                    )
-                )
-                continue
-
-            attempted += 1
-            self.log(
-                f"AssetAgent API request {attempted}/{self.config.max_generations}: "
-                f"{request.prefab}"
-            )
             try:
-                generated_model = _generate_to_cache(
-                    request,
-                    config=self.config,
-                    source_repo_root=self.source_repo_root,
-                    cache_root=self.cache_root,
-                    environment=self.environment,
-                    runner=self.command_runner,
-                )
+                generated_model = generation_futures[request.cache_key].result()
                 scene_path, digest = _publish_cached_asset(
                     generated_model, project, request.cache_key
                 )
@@ -690,6 +764,7 @@ class AssetAgent:
                 "mode": self.config.mode,
                 "image_model": self.config.image_model,
                 "max_api_generations": self.config.max_generations,
+                "max_parallel_workers": self.config.max_workers,
                 "attempted_api_generations": attempted,
             },
             "assets": entries,
@@ -745,6 +820,7 @@ __all__ = [
     "AGENT_ROLE",
     "AGENT_VERSION",
     "ASSET_MAX_GENERATIONS_ENV",
+    "ASSET_MAX_WORKERS_ENV",
     "ASSET_MODE_ENV",
     "AssetAgent",
     "AssetAgentConfig",

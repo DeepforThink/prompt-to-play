@@ -29,32 +29,50 @@ WorldPlannerAgent (structured model API)
 validated WorldSpec
         |
         v
-AssetAgent -> image API -> Tripo3D API -> content-addressed GLB cache
+Host refinement DAG
+  |-- layout Subagent ---------|
+  |-- gameplay Subagent -------|--> owned PatchSpec merge --> repeat to convergence
+  +-- lighting/camera Subagent-|
+        |
+        v
+bounded Asset Subagents -> image API -> Tripo3D API -> content-addressed GLB cache
         |
         v
 Godot BuildExecutor (catalog assets first, primitive last fallback)
         |
         v
 structural checks -> fixed-camera capture -> VisualEvaluationAgent
-        |                                      |
-        | accept                               | issues
-        v                                      v
-  best-revision selection          RepairAgent -> revised WorldSpec
-                                                   |
-                                      host derives PatchSpec
-                                                   |
-                                                   +----> assets/build/capture
+                                               |
+                                  per-camera observations
+                                               |
+                                  host score and acceptance gate
+                                     | pass              | fail
+                                     v                   v
+                           best-revision selection   RepairAgent
+                                     |                   |
+                                     |        host derives PatchSpec
+                                     |                   |
+                                     +<------ assets/build/capture
 ```
 
-The three model roles have isolated contexts, role-specific model settings,
-strict JSON schemas, and trace entries. AssetAgent is a separate bounded tool
-worker with its own asset manifest rather than a fictitious model session. The
-visual evaluator cannot edit the world or
-decide Token, timing, or aggregate metrics. RepairAgent returns a complete
+The four model roles have isolated contexts, role-specific model settings,
+strict JSON schemas, and trace entries. After WorldPlanner returns one complete
+WorldSpec, the host derives a fixed three-task DAG; the model cannot amplify the
+task count. Each refinement worker receives an independent provider instance
+and an explicit kind/field ownership set. Workers return complete candidates,
+while the host derives PatchSpec operations, rejects stale or unauthorized
+writes, and repeats until all workers return no change or the bounded iteration
+limit is reached. AssetAgent uses separate bounded workers for unique prefabs
+and writes one host-ordered asset manifest. The visual evaluator cannot edit the world or
+decide acceptance, Token, timing, or aggregate metrics. It scores every capture
+camera across the six visual dimensions; the host combines the mean and worst
+camera and derives `scene_similarity` and `accepted`. RepairAgent returns a complete
 candidate WorldSpec; the host validates it and deterministically derives only
 allowlisted stable-ID PatchSpec operations. A stale patch hash is rejected. The
 workflow keeps the best revision and permits at most two correction rounds
-after the initial build.
+after the initial build. Launch requires the selected revision to pass all
+gates; when every revision fails, evidence and selection are retained and the
+pipeline stops before launch.
 
 ## Generality boundary
 
@@ -75,7 +93,8 @@ generation, creates a reference image and converts it to a PBR GLB. Godot loads
 the strict catalog entry, while unresolved IDs receive a deterministic
 primitive fallback so a new prompt still produces a playable world instead of
 failing on a missing model. Its paid-attempt limit is shared by the full run,
-not reset for each correction revision.
+not reset for each correction revision. Up to four unique-prefab workers run in
+parallel, while budget reservation and final manifest ordering remain host-owned.
 
 Regions also drive a deterministic PCG decoration pass. Semantic region and
 theme tokens select vegetation, ruin, industrial, or generic primitive
@@ -101,7 +120,8 @@ The six course metrics are represented directly:
 | Token efficiency | Recorded model calls and input/output token counts |
 | Reproducibility | Exact Godot source hash on the first run; exact WorldSpec comparison with prior runs of the same request thereafter |
 
-Each run retains its request, every WorldSpec revision, asset catalog and rich
+Each run retains its request, the Planner baseline, every refinement round and
+task outcome, every WorldSpec revision, asset catalog and rich
 asset manifest, build manifest, structural report, visual feedback, scored
 evaluation, patches, screenshots, best-revision selection, elapsed time, and
 per-agent model/Token trace. A good-looking screenshot cannot override a failed

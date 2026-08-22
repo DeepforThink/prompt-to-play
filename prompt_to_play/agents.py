@@ -11,6 +11,7 @@ import hashlib
 import os
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,17 +22,20 @@ from . import contracts
 from .provider import ProviderUsage, create_provider_from_env
 
 
-TRACE_SCHEMA = "prompt-to-play/agent-trace@1"
+TRACE_SCHEMA = "prompt-to-play/agent-trace@2"
+MAX_SUBAGENT_CONCURRENCY = 4
 
 
 class AgentRole(str, Enum):
     WORLD_PLANNER = "world_planner"
+    WORLD_REFINER = "world_refiner"
     VISUAL_EVALUATOR = "visual_evaluator"
     REPAIR = "repair"
 
 
 ROLE_MODEL_ENV: Mapping[AgentRole, str] = {
     AgentRole.WORLD_PLANNER: "PROMPT_TO_PLAY_PLANNER_MODEL",
+    AgentRole.WORLD_REFINER: "PROMPT_TO_PLAY_REFINER_MODEL",
     AgentRole.VISUAL_EVALUATOR: "PROMPT_TO_PLAY_EVALUATOR_MODEL",
     AgentRole.REPAIR: "PROMPT_TO_PLAY_REPAIR_MODEL",
 }
@@ -55,6 +59,8 @@ ProviderFactory = Callable[[AgentRole, Mapping[str, str], Path], StructuredProvi
 class AgentCallTrace:
     sequence: int
     role: str
+    instance_id: str
+    task_id: str | None
     schema_name: str
     status: str
     started_at_utc: str
@@ -71,6 +77,16 @@ class AgentCallTrace:
     output_tokens: int
     total_tokens: int
     error_type: str | None
+
+
+@dataclass(frozen=True)
+class AgentTask:
+    """One host-declared bounded unit of work in an Agent DAG."""
+
+    task_id: str
+    role: AgentRole
+    depends_on: tuple[str, ...] = ()
+    owned_fields: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _utc_now() -> str:
@@ -122,11 +138,15 @@ class TracingAgentProvider:
     def __init__(
         self,
         role: AgentRole,
+        instance_id: str,
+        task_id: str | None,
         provider: StructuredProvider,
         record: Callable[[AgentCallTrace], None],
         next_sequence: Callable[[], int],
     ) -> None:
         self.role = role
+        self.instance_id = instance_id
+        self.task_id = task_id
         self.provider = provider
         self._record = record
         self._next_sequence = next_sequence
@@ -148,6 +168,8 @@ class TracingAgentProvider:
         image_sha256 = _image_digests(image_paths)
         request_document = {
             "role": self.role.value,
+            "instance_id": self.instance_id,
+            "task_id": self.task_id,
             "messages": [dict(message) for message in messages],
             "json_schema": json_schema,
             "schema_name": schema_name,
@@ -179,6 +201,8 @@ class TracingAgentProvider:
                 AgentCallTrace(
                     sequence=sequence,
                     role=self.role.value,
+                    instance_id=self.instance_id,
+                    task_id=self.task_id,
                     schema_name=schema_name,
                     status=status,
                     started_at_utc=started_at,
@@ -218,7 +242,7 @@ class MultiAgentRuntime:
             if provider_factory is None
             else provider_factory
         )
-        self._agents: dict[AgentRole, TracingAgentProvider] = {}
+        self._agents: dict[tuple[AgentRole, str], TracingAgentProvider] = {}
         self._traces: list[AgentCallTrace] = []
         self._lock = threading.Lock()
         self._sequence = 0
@@ -247,20 +271,43 @@ class MultiAgentRuntime:
         with self._lock:
             self._traces.append(trace)
 
-    def agent(self, role: AgentRole) -> TracingAgentProvider:
+    def agent(
+        self,
+        role: AgentRole,
+        *,
+        instance_id: str | None = None,
+        task_id: str | None = None,
+    ) -> TracingAgentProvider:
+        resolved_instance = role.value if instance_id is None else instance_id.strip()
+        if not resolved_instance:
+            raise ValueError("instance_id must not be empty")
+        if task_id is not None and not task_id.strip():
+            raise ValueError("task_id must not be empty")
+        key = (role, resolved_instance)
         with self._lock:
-            existing = self._agents.get(role)
+            existing = self._agents.get(key)
         if existing is not None:
+            if existing.task_id != task_id:
+                raise ValueError(
+                    f"agent instance {resolved_instance!r} already owns a different task"
+                )
             return existing
         provider = self._provider_factory(role, self.environment, self.repo)
         created = TracingAgentProvider(
             role,
+            resolved_instance,
+            task_id,
             provider,
             self._record,
             self._next_sequence,
         )
         with self._lock:
-            return self._agents.setdefault(role, created)
+            return self._agents.setdefault(key, created)
+
+    def subagent(self, role: AgentRole, task_id: str) -> TracingAgentProvider:
+        """Return an isolated provider instance dedicated to one stable task ID."""
+
+        return self.agent(role, instance_id=task_id, task_id=task_id)
 
     def traces(self) -> tuple[AgentCallTrace, ...]:
         with self._lock:
@@ -293,3 +340,96 @@ class MultiAgentRuntime:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(contracts.canonical_json_bytes(document) + b"\n")
         return output
+
+
+def _validate_task_graph(tasks: Sequence[AgentTask]) -> tuple[AgentTask, ...]:
+    ordered = tuple(tasks)
+    ids = [task.task_id for task in ordered]
+    if any(not task_id.strip() for task_id in ids):
+        raise ValueError("task_id must not be empty")
+    if len(ids) != len(set(ids)):
+        raise ValueError("task IDs must be unique")
+    known = set(ids)
+    for task in ordered:
+        unknown = sorted(set(task.depends_on) - known)
+        if unknown:
+            raise ValueError(
+                f"task {task.task_id!r} has unknown dependencies: {', '.join(unknown)}"
+            )
+        if task.task_id in task.depends_on:
+            raise ValueError(f"task {task.task_id!r} cannot depend on itself")
+
+    remaining = {task.task_id: set(task.depends_on) for task in ordered}
+    resolved: set[str] = set()
+    while remaining:
+        ready = [task_id for task_id, deps in remaining.items() if deps <= resolved]
+        if not ready:
+            raise ValueError("task graph contains a dependency cycle")
+        resolved.update(ready)
+        for task_id in ready:
+            del remaining[task_id]
+    return ordered
+
+
+def run_task_dag(
+    tasks: Sequence[AgentTask],
+    execute: Callable[[AgentTask], Any],
+    *,
+    max_workers: int = MAX_SUBAGENT_CONCURRENCY,
+) -> tuple[Any, ...]:
+    """Execute ready tasks concurrently and return results in declaration order."""
+
+    ordered = _validate_task_graph(tasks)
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int):
+        raise ValueError("max_workers must be an integer")
+    if not 1 <= max_workers <= MAX_SUBAGENT_CONCURRENCY:
+        raise ValueError(
+            f"max_workers must be between 1 and {MAX_SUBAGENT_CONCURRENCY}"
+        )
+    if not ordered:
+        return ()
+
+    by_id = {task.task_id: task for task in ordered}
+    order_index = {task.task_id: index for index, task in enumerate(ordered)}
+    pending = set(by_id)
+    completed: set[str] = set()
+    results: dict[str, Any] = {}
+    running: dict[Future[Any], str] = {}
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(ordered))) as pool:
+        while pending or running:
+            ready = sorted(
+                (
+                    task_id
+                    for task_id in pending
+                    if set(by_id[task_id].depends_on) <= completed
+                ),
+                key=order_index.__getitem__,
+            )
+            for task_id in ready[: max_workers - len(running)]:
+                pending.remove(task_id)
+                future = pool.submit(execute, by_id[task_id])
+                running[future] = task_id
+            if not running:
+                raise RuntimeError("task graph scheduler made no progress")
+            finished, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
+            for future in sorted(
+                finished, key=lambda item: order_index[running[item]]
+            ):
+                task_id = running.pop(future)
+                results[task_id] = future.result()
+                completed.add(task_id)
+    return tuple(results[task.task_id] for task in ordered)
+
+
+__all__ = [
+    "AgentCallTrace",
+    "AgentRole",
+    "AgentTask",
+    "MAX_SUBAGENT_CONCURRENCY",
+    "MultiAgentRuntime",
+    "ROLE_MODEL_ENV",
+    "TRACE_SCHEMA",
+    "TracingAgentProvider",
+    "run_task_dag",
+]

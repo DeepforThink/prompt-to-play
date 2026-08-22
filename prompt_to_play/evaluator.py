@@ -32,6 +32,24 @@ REPAIR_AGENT_ROLE = "repair"
 DEFAULT_MIN_SCENE_SIMILARITY = 0.75
 ISSUE_SEVERITIES = ("info", "minor", "major", "blocker")
 BLOCKING_SEVERITIES = frozenset(("major", "blocker"))
+CAMERA_SCORE_FIELDS = (
+    "prompt_alignment",
+    "composition",
+    "lighting_materials",
+    "landmark_readability",
+    "camera_coverage",
+    "visible_defects",
+)
+CAMERA_SCORE_WEIGHTS: Mapping[str, float] = {
+    "prompt_alignment": 0.35,
+    "composition": 0.13,
+    "lighting_materials": 0.13,
+    "landmark_readability": 0.13,
+    "camera_coverage": 0.16,
+}
+DEFECT_FREE_WEIGHT = 0.10
+MEAN_CAMERA_WEIGHT = 0.70
+WORST_CAMERA_WEIGHT = 0.30
 
 
 class EvaluatorError(ValueError):
@@ -63,15 +81,41 @@ VISUAL_ISSUE_JSON_SCHEMA = _object(
                 {"type": "null"},
             ]
         },
+        "camera_id": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                },
+                {"type": "null"},
+            ]
+        },
         "message": {"type": "string", "minLength": 1},
         "suggested_fix": {"type": "string", "minLength": 1},
     }
 )
 
+CAMERA_EVALUATION_JSON_SCHEMA = _object(
+    {
+        "camera_id": {
+            "type": "string",
+            "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+        },
+        **{
+            field: {"type": "number", "minimum": 0, "maximum": 1}
+            for field in CAMERA_SCORE_FIELDS
+        },
+    }
+)
+
 VISUAL_FEEDBACK_JSON_SCHEMA = _object(
     {
-        "scene_similarity": {"type": "number", "minimum": 0, "maximum": 1},
-        "accepted": {"type": "boolean"},
+        "camera_evaluations": {
+            "type": "array",
+            "items": CAMERA_EVALUATION_JSON_SCHEMA,
+            "minItems": 1,
+            "maxItems": 8,
+        },
         "issues": {
             "type": "array",
             "items": VISUAL_ISSUE_JSON_SCHEMA,
@@ -89,14 +133,18 @@ images, and the supplied WorldSpec. Reference images are attached first and
 rendered screenshots second; their exact counts are included in the request.
 Return only the strict visual-feedback JSON object described by the schema.
 
-Judge composition, recognisable requested landmarks, atmosphere, materials,
-lighting, visual coherence, and whether the screenshots visibly express the
-prompt. Use entity_id only when a WorldSpec entity is responsible; otherwise
-use null. Give stable machine-readable issue codes and concrete suggested fixes.
+Return one camera_evaluations entry for every rendered screenshot. Score
+prompt_alignment, composition, lighting_materials, landmark_readability, and
+camera_coverage from 0 (unacceptable) to 1 (excellent). Score visible_defects
+from 0 (none) to 1 (severe or widespread). Use camera_id from the supplied
+screenshot manifest exactly. Use entity_id only when a WorldSpec entity is
+responsible; otherwise use null. Bind camera-specific issues to camera_id and
+use null only for genuinely global issues. Give stable machine-readable issue
+codes and concrete suggested fixes.
 
 Do not report or infer generation time, token usage, cost, structural validity,
-reproducibility, aggregate evaluation scores, correction limits, or system
-policy. Those measurements belong exclusively to the host orchestrator.
+reproducibility, aggregate evaluation scores, acceptance, correction limits,
+or system policy. Those decisions belong exclusively to the host orchestrator.
 """
 
 
@@ -160,23 +208,108 @@ def _known_entity_ids(world: Mapping[str, Any]) -> set[str]:
     return entity_ids
 
 
+def _unit_score(value: Any, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise EvaluatorError(f"{path}: expected a number")
+    score = float(value)
+    if not math.isfinite(score) or not 0 <= score <= 1:
+        raise EvaluatorError(f"{path}: expected a value from 0 to 1")
+    return score
+
+
+def _camera_score(evaluation: Mapping[str, Any]) -> float:
+    positive = sum(
+        float(evaluation[field]) * weight
+        for field, weight in CAMERA_SCORE_WEIGHTS.items()
+    )
+    defect_free = (1.0 - float(evaluation["visible_defects"])) * DEFECT_FREE_WEIGHT
+    return positive + defect_free
+
+
+def _normalize_camera_evaluations(
+    value: Any,
+    expected_camera_ids: Sequence[str] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise EvaluatorError(
+            "visual feedback.camera_evaluations: expected at least one item"
+        )
+    if len(value) > 8:
+        raise EvaluatorError(
+            "visual feedback.camera_evaluations: at most 8 items are allowed"
+        )
+    required = {"camera_id", *CAMERA_SCORE_FIELDS}
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(value):
+        path = f"visual feedback.camera_evaluations[{index}]"
+        if not isinstance(raw, Mapping):
+            raise EvaluatorError(f"{path}: expected an object")
+        missing = sorted(required - set(raw))
+        extra = sorted(set(raw) - required)
+        if missing:
+            raise EvaluatorError(f"{path}: missing keys: {', '.join(missing)}")
+        if extra:
+            raise EvaluatorError(f"{path}: unknown keys: {', '.join(extra)}")
+        camera_id = _nonempty_string(raw["camera_id"], f"{path}.camera_id")
+        if not contracts.ENTITY_ID_RE.fullmatch(camera_id):
+            raise EvaluatorError(f"{path}.camera_id: invalid camera ID")
+        if camera_id in by_id:
+            raise EvaluatorError(f"{path}.camera_id: duplicate camera {camera_id!r}")
+        normalized = {"camera_id": camera_id}
+        normalized.update(
+            {
+                field: _unit_score(raw[field], f"{path}.{field}")
+                for field in CAMERA_SCORE_FIELDS
+            }
+        )
+        by_id[camera_id] = normalized
+
+    if expected_camera_ids is None:
+        order = list(by_id)
+    else:
+        order = list(expected_camera_ids)
+        if len(set(order)) != len(order):
+            raise EvaluatorError("expected_camera_ids: duplicate camera ID")
+        missing_cameras = sorted(set(order) - set(by_id))
+        unknown_cameras = sorted(set(by_id) - set(order))
+        if missing_cameras:
+            raise EvaluatorError(
+                "visual feedback.camera_evaluations: missing cameras: "
+                + ", ".join(missing_cameras)
+            )
+        if unknown_cameras:
+            raise EvaluatorError(
+                "visual feedback.camera_evaluations: unknown cameras: "
+                + ", ".join(unknown_cameras)
+            )
+    return [by_id[camera_id] for camera_id in order]
+
+
+def _aggregate_camera_scores(evaluations: Sequence[Mapping[str, Any]]) -> float:
+    scores = [_camera_score(evaluation) for evaluation in evaluations]
+    mean_score = sum(scores) / len(scores)
+    return mean_score * MEAN_CAMERA_WEIGHT + min(scores) * WORST_CAMERA_WEIGHT
+
+
 def validate_visual_feedback(
     document: Any,
     world_document: Any | None = None,
     *,
     min_scene_similarity: float = DEFAULT_MIN_SCENE_SIMILARITY,
+    expected_camera_ids: Sequence[str] | None = None,
+    allow_host_fields: bool = False,
 ) -> dict[str, Any]:
-    """Validate model feedback and recompute its visual-only acceptance gate.
-
-    ``accepted`` is present in the structured model response for auditability,
-    but it is not trusted: it must agree with the host-owned threshold and the
-    absence of major/blocker issues.
-    """
+    """Validate observations and derive the host-owned visual decision."""
 
     threshold = _similarity_threshold(min_scene_similarity)
     if not isinstance(document, Mapping):
         raise EvaluatorError("visual feedback: expected an object")
-    required = {"scene_similarity", "accepted", "issues"}
+    model_keys = {"camera_evaluations", "issues"}
+    required = (
+        model_keys | {"scene_similarity", "accepted"}
+        if allow_host_fields
+        else model_keys
+    )
     missing = sorted(required - set(document))
     extra = sorted(set(document) - required)
     if missing:
@@ -184,16 +317,11 @@ def validate_visual_feedback(
     if extra:
         raise EvaluatorError("visual feedback: unknown keys: " + ", ".join(extra))
 
-    score_value = document["scene_similarity"]
-    if isinstance(score_value, bool) or not isinstance(score_value, (int, float)):
-        raise EvaluatorError("visual feedback.scene_similarity: expected a number")
-    score = float(score_value)
-    if not math.isfinite(score) or not 0 <= score <= 1:
-        raise EvaluatorError(
-            "visual feedback.scene_similarity: expected a value from 0 to 1"
-        )
-    if not isinstance(document["accepted"], bool):
-        raise EvaluatorError("visual feedback.accepted: expected a boolean")
+    camera_evaluations = _normalize_camera_evaluations(
+        document["camera_evaluations"], expected_camera_ids
+    )
+    camera_ids = {evaluation["camera_id"] for evaluation in camera_evaluations}
+    score = _aggregate_camera_scores(camera_evaluations)
     if not isinstance(document["issues"], list):
         raise EvaluatorError("visual feedback.issues: expected an array")
     if len(document["issues"]) > 32:
@@ -213,7 +341,14 @@ def validate_visual_feedback(
         path = f"visual feedback.issues[{index}]"
         if not isinstance(value, Mapping):
             raise EvaluatorError(f"{path}: expected an object")
-        issue_keys = {"code", "severity", "entity_id", "message", "suggested_fix"}
+        issue_keys = {
+            "code",
+            "severity",
+            "entity_id",
+            "camera_id",
+            "message",
+            "suggested_fix",
+        }
         missing_issue = sorted(issue_keys - set(value))
         extra_issue = sorted(set(value) - issue_keys)
         if missing_issue:
@@ -240,11 +375,19 @@ def validate_visual_feedback(
                 raise EvaluatorError(
                     f"{path}.entity_id: unknown WorldSpec entity {entity_id!r}"
                 )
+        camera_id = value["camera_id"]
+        if camera_id is not None:
+            camera_id = _nonempty_string(camera_id, f"{path}.camera_id")
+            if camera_id not in camera_ids:
+                raise EvaluatorError(
+                    f"{path}.camera_id: unknown evaluated camera {camera_id!r}"
+                )
         issues.append(
             {
                 "code": code,
                 "severity": severity,
                 "entity_id": entity_id,
+                "camera_id": camera_id,
                 "message": _nonempty_string(value["message"], f"{path}.message"),
                 "suggested_fix": _nonempty_string(
                     value["suggested_fix"], f"{path}.suggested_fix"
@@ -255,17 +398,27 @@ def validate_visual_feedback(
     expected_accepted = score >= threshold and not any(
         issue["severity"] in BLOCKING_SEVERITIES for issue in issues
     )
-    if document["accepted"] != expected_accepted:
-        raise EvaluatorError(
-            "visual feedback.accepted: must equal the host visual gate "
-            f"({expected_accepted!r})"
+    if allow_host_fields:
+        reported_score = _unit_score(
+            document["scene_similarity"], "visual feedback.scene_similarity"
         )
+        if not math.isclose(reported_score, score, rel_tol=0.0, abs_tol=1e-6):
+            raise EvaluatorError(
+                "visual feedback.scene_similarity: does not match host aggregation"
+            )
+        if not isinstance(document["accepted"], bool):
+            raise EvaluatorError("visual feedback.accepted: expected a boolean")
+        if document["accepted"] != expected_accepted:
+            raise EvaluatorError(
+                "visual feedback.accepted: does not match the host visual gate"
+            )
     if not expected_accepted and not issues:
         raise EvaluatorError(
             "visual feedback.issues: rejected feedback requires an actionable issue"
         )
     return {
-        "scene_similarity": score,
+        "camera_evaluations": camera_evaluations,
+        "scene_similarity": round(score, 6),
         "accepted": expected_accepted,
         "issues": issues,
     }
@@ -290,6 +443,40 @@ def _resolve_images(
             )
         resolved.append(image)
     return root, resolved
+
+
+def _camera_ids_from_paths(paths: Sequence[Path]) -> list[str]:
+    camera_ids: list[str] = []
+    seen: set[str] = set()
+    for index, path in enumerate(paths):
+        camera_id = path.stem
+        if contracts.ENTITY_ID_RE.fullmatch(camera_id) is None:
+            raise EvaluatorError(
+                f"screenshot_image_paths[{index}]: filename stem is not a camera ID"
+            )
+        if camera_id in seen:
+            raise EvaluatorError(
+                f"screenshot_image_paths[{index}]: duplicate camera ID {camera_id!r}"
+            )
+        seen.add(camera_id)
+        camera_ids.append(camera_id)
+    return camera_ids
+
+
+def _visual_feedback_schema(camera_ids: Sequence[str]) -> dict[str, Any]:
+    schema = copy.deepcopy(VISUAL_FEEDBACK_JSON_SCHEMA)
+    evaluations = schema["properties"]["camera_evaluations"]
+    evaluations["minItems"] = len(camera_ids)
+    evaluations["maxItems"] = len(camera_ids)
+    evaluations["items"]["properties"]["camera_id"] = {
+        "type": "string",
+        "enum": list(camera_ids),
+    }
+    issue_camera = schema["properties"]["issues"]["items"]["properties"][
+        "camera_id"
+    ]
+    issue_camera["anyOf"][0] = {"type": "string", "enum": list(camera_ids)}
+    return schema
 
 
 def _resolve_reference_images(
@@ -381,19 +568,23 @@ class VisualEvaluationAgent:
         root, screenshots = _resolve_images(
             screenshot_image_paths, self.project_root
         )
+        camera_ids = _camera_ids_from_paths(screenshots)
         references = _resolve_reference_images(reference_image_paths, root)
         payload = {
             "agent": self.name,
             "role": self.role,
             "original_prompt": prompt,
             "current_world": world,
-            "host_visual_gate": {
-                "min_scene_similarity": self.min_scene_similarity,
-                "blocking_severities": sorted(BLOCKING_SEVERITIES),
-            },
             "reference_image_count": len(references),
             "screenshot_count": len(screenshots),
             "attached_image_order": "reference_images_then_rendered_screenshots",
+            "screenshot_cameras": [
+                {
+                    "camera_id": camera_id,
+                    "attached_image_index": len(references) + index + 1,
+                }
+                for index, camera_id in enumerate(camera_ids)
+            ],
         }
         messages = [
             {
@@ -410,7 +601,7 @@ class VisualEvaluationAgent:
         try:
             response = _active_provider(self.provider, root).generate_json(
                 messages,
-                json_schema=copy.deepcopy(VISUAL_FEEDBACK_JSON_SCHEMA),
+                json_schema=_visual_feedback_schema(camera_ids),
                 schema_name="prompt_to_play_visual_feedback",
                 image_paths=[*references, *screenshots],
             )
@@ -422,6 +613,7 @@ class VisualEvaluationAgent:
             response,
             world,
             min_scene_similarity=self.min_scene_similarity,
+            expected_camera_ids=camera_ids,
         )
 
 
@@ -459,13 +651,16 @@ class RepairAgent:
             raise EvaluatorError(f"current WorldSpec is invalid: {exc}") from exc
         if prompt != current["brief"]["text"]:
             raise EvaluatorError("prompt: must equal current WorldSpec brief.text")
+        root, screenshots = _resolve_images(
+            screenshot_image_paths, self.project_root
+        )
+        camera_ids = _camera_ids_from_paths(screenshots)
         feedback = validate_visual_feedback(
             feedback_document,
             current,
             min_scene_similarity=self.min_scene_similarity,
-        )
-        root, screenshots = _resolve_images(
-            screenshot_image_paths, self.project_root
+            expected_camera_ids=camera_ids,
+            allow_host_fields=True,
         )
         references = _resolve_reference_images(reference_image_paths, root)
         structural_failures = _structural_failures(structural_report)

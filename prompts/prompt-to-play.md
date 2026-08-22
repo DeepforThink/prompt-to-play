@@ -23,9 +23,11 @@ Unknown logical prefab IDs must receive a deterministic primitive fallback. Miss
 
 Represent the plan as a validated `WorldSpec`; do not build directly from prose. Use stable IDs and repository-relative logical prefab IDs. Validate with `prompt_to_play/contracts.py` before opening the engine.
 
-Keep immutable evidence under `artifacts/runs/<run_id>/rev_<n>/`:
+Keep run-level orchestration evidence under `artifacts/runs/<run_id>/` and immutable revision evidence under `artifacts/runs/<run_id>/rev_<n>/`:
 
 - `request.json`: prompt, reference descriptors and hashes, request hash, and derived seed;
+- `refinement.json`: Planner hash, every bounded refinement round, task ownership/status/timing, candidate and patch hashes, merged patches, and convergence reason;
+- `agent_trace.json`: role, isolated instance, task ID, input/output hashes, timing, model, and Token usage for every model call;
 - `world_spec.json`: the validated semantic source of truth;
 - `build_manifest.json`: spec hash, seed, stable IDs, resolved transforms/prefabs, tool versions, timings, warnings, and errors;
 - `structural_report.json`: hard checks and machine-readable issues;
@@ -37,12 +39,12 @@ Never overwrite an earlier revision. The delivered project must load the selecte
 
 ## Mandatory Plan -> Execute -> Evaluate -> Correct loop
 
-1. **Plan** — interpret the prompt and references, derive request hash and seed, create a complete WorldSpec, then validate its schema, unique IDs, references, paths, objective graph, and completion path.
+1. **Plan and refine** — WorldPlanner creates one complete WorldSpec. The host then derives fixed layout, gameplay, and lighting/camera tasks and runs isolated Subagents concurrently. Each task may update only its assigned fields on existing stable IDs. The host derives and merges non-overlapping PatchSpec operations, records the round, and repeats until all tasks return no change or the host iteration cap is reached. The model cannot create tasks or raise either cap.
 2. **Execute** — compile the WorldSpec deterministically. Generate regions, roads, buildings, props, lights, cameras, player spawn, interactables, objectives, and exit from their arrays rather than fixed names or counts. Save, reload, and verify the scene before declaring the build successful.
 3. **Structural evaluation** — run headlessly and require at least `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`. Also report duplicate IDs, dangling references, invalid transforms, missing collisions, runtime exceptions, and fallback assets. The evaluator observes; it never edits.
-4. **Capture and score** — only after the structural gates pass, capture the declared fixed cameras with recorded renderer and resolution settings. Score exactly `scene_similarity`, `structural_correctness`, `automation_loop`, `generation_speed`, `token_efficiency`, and `reproducibility`. If a reference-dependent comparison is unavailable, report the limitation instead of inventing evidence. Time and tokens are measurements normalized by policy references; exceeding those references is not itself a hard failure.
-5. **Correct** — give the feedback Agent only the original request, relevant reference summary, current WorldSpec, scores, hard-check results, and top evidence-backed issues. It must return one of `accept`, `patch`, `rollback`, or `stop`. A `patch` decision must contain only operations allowed by `contracts.py`, address stable IDs, and match `base_spec_hash`; arbitrary code, paths, shaders, or shell commands are forbidden.
-6. **Repeat and select** — validate every patch, rebuild from the resulting complete WorldSpec, and reevaluate. Permit at most the policy's two correction rounds after the initial build. A hard-pass revision always outranks a hard-fail revision; among hard-pass revisions choose the highest weighted score. Roll back when a correction regresses the best result.
+4. **Capture and score** — only after the structural gates pass, capture every declared evaluation camera with recorded renderer and resolution settings. The Visual Agent scores each camera for prompt alignment, composition, lighting/materials, landmark readability, camera coverage, and visible defects; it does not output acceptance. The host combines mean and worst-camera quality and derives `scene_similarity` and `accepted`, then records exactly `scene_similarity`, `structural_correctness`, `automation_loop`, `generation_speed`, `token_efficiency`, and `reproducibility`. If a reference-dependent comparison is unavailable, report the limitation instead of inventing evidence. Time and tokens are measurements normalized by policy references; exceeding those references is not itself a hard failure.
+5. **Correct** — when the host-derived result requires a patch, give RepairAgent only the original request, relevant references, current WorldSpec, host-normalized visual feedback, hard-check failures, and screenshots. RepairAgent returns a complete candidate WorldSpec. The host rejects authoritative or semantic changes, derives an allowlisted PatchSpec against the exact base hash, and applies it by stable ID; arbitrary code, paths, shaders, or shell commands are forbidden.
+6. **Repeat and select** — validate every patch, rebuild from the resulting complete WorldSpec, and reevaluate. Permit at most the policy's two correction rounds after the initial build. A hard-pass revision always outranks a hard-fail revision; among hard-pass revisions choose the highest weighted score. Launch only a selected hard-pass revision. If all revisions fail, preserve their evidence and selection, then stop before launching Godot.
 
 ## Interaction and proof
 
