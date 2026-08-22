@@ -23,11 +23,13 @@ public partial class WorldRuntime : Node3D
     private WorldSpec _spec = null!;
     private string _sourceJson = string.Empty;
     private Node3D _generated = null!;
+    private PrefabResolver _prefabResolver = null!;
     private ObjectiveManager _objectiveManager = null!;
     private ExitGate? _exitGate;
     private Label? _hud;
     private string _lastMessage = string.Empty;
     private int _exitCode;
+    private bool _worldBuilt;
 
     private Color _skyColor;
     private Color _groundColor;
@@ -42,6 +44,7 @@ public partial class WorldRuntime : Node3D
         {
             EnsureInputActions();
             _spec = LoadAndValidateSpec();
+            _prefabResolver = PrefabResolver.LoadDefault();
             ResolvePalette();
 
             _generated = new Node3D { Name = "Generated" };
@@ -57,6 +60,7 @@ public partial class WorldRuntime : Node3D
                 _manifestEntities,
                 _primitiveFallbackIds,
                 checks);
+            _worldBuilt = true;
             _exitCode = checks.All(check => check.Passed) ? 0 : 1;
         }
         catch (Exception exception)
@@ -69,7 +73,7 @@ public partial class WorldRuntime : Node3D
 
         bool captureRequested = OS.GetEnvironment("PTP_CAPTURE") == "1";
         bool headless = DisplayServer.GetName() == "headless";
-        if (_exitCode != 0)
+        if (!_worldBuilt)
         {
             GetTree().Quit(_exitCode);
         }
@@ -84,7 +88,11 @@ public partial class WorldRuntime : Node3D
         }
         else if (headless)
         {
-            GetTree().Quit(0);
+            GetTree().Quit(_exitCode);
+        }
+        else if (_exitCode != 0)
+        {
+            GetTree().Quit(_exitCode);
         }
     }
 
@@ -644,6 +652,20 @@ public partial class WorldRuntime : Node3D
         root.SetMeta("prefab", prefab);
         RegisterStable(root, stableId, kind, seed, position);
 
+        if (_prefabResolver.TryInstantiate(
+                prefab,
+                root,
+                scale,
+                addCollision: true,
+                out string assetFailure))
+        {
+            return;
+        }
+
+        root.SetMeta("asset_resolution", "primitive_fallback");
+        root.SetMeta("asset_resolution_error", assetFailure);
+        _primitiveFallbackIds.Add(stableId);
+
         string token = prefab.ToLowerInvariant();
         if (token.Contains("tree") || token.Contains("forest"))
         {
@@ -664,7 +686,6 @@ public partial class WorldRuntime : Node3D
         }
         else
         {
-            _primitiveFallbackIds.Add(stableId);
             switch (seed % 3u)
             {
                 case 0:
@@ -954,12 +975,23 @@ public partial class WorldRuntime : Node3D
                 CollisionLayer = 2,
                 CollisionMask = 1,
             };
-            PrimitiveFactory.AddSphereVisual(
-                interactable,
-                "Visual",
-                Vector3.Zero,
-                0.65f,
-                material);
+            if (!_prefabResolver.TryInstantiate(
+                    spec.Prefab,
+                    interactable,
+                    Vector3.One,
+                    addCollision: false,
+                    out string assetFailure))
+            {
+                interactable.SetMeta("asset_resolution", "primitive_fallback");
+                interactable.SetMeta("asset_resolution_error", assetFailure);
+                _primitiveFallbackIds.Add(spec.Id);
+                PrimitiveFactory.AddSphereVisual(
+                    interactable,
+                    "Visual",
+                    Vector3.Zero,
+                    0.65f,
+                    material);
+            }
             interactable.AddChild(new CollisionShape3D
             {
                 Name = "InteractionArea",
@@ -981,11 +1013,6 @@ public partial class WorldRuntime : Node3D
             interactable.SetMeta("label", spec.Label);
             interactable.SetMeta("prefab", spec.Prefab);
             RegisterStable(interactable, spec.Id, "interactable", seed, interactable.Position);
-
-            if (!IsKnownPrefab(spec.Prefab))
-            {
-                _primitiveFallbackIds.Add(spec.Id);
-            }
         }
     }
 
@@ -1190,7 +1217,9 @@ public partial class WorldRuntime : Node3D
             }
 
             ArtifactWriter.WriteCaptureManifest(_spec, captures);
-            GetTree().Quit(0);
+            // Preserve a structural failure exit code after writing visual
+            // evidence so the host can route both reports to RepairAgent.
+            GetTree().Quit(_exitCode);
         }
         catch (Exception exception)
         {
@@ -1376,18 +1405,6 @@ public partial class WorldRuntime : Node3D
     private string RuntimeId(string suffix)
     {
         return $"runtime.{_spec.WorldId}.{suffix}";
-    }
-
-    private static bool IsKnownPrefab(string prefab)
-    {
-        string token = prefab.ToLowerInvariant();
-        string[] knownTokens =
-        {
-            "tree", "forest", "ruin", "arch", "temple", "building", "factory",
-            "tower", "house", "rock", "boulder", "core", "switch", "terminal",
-            "artifact", "shrine", "repair", "inspect",
-        };
-        return knownTokens.Any(token.Contains);
     }
 
     private static bool ContainsAny(string value, params string[] tokens)

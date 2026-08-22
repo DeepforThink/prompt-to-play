@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 
 
@@ -13,6 +14,8 @@ class GodotTemplateTests(unittest.TestCase):
         cls.runtime = (SCRIPTS / "WorldRuntime.cs").read_text(encoding="utf-8")
         cls.spec = (SCRIPTS / "WorldSpec.cs").read_text(encoding="utf-8")
         cls.artifacts = (SCRIPTS / "ArtifactWriter.cs").read_text(encoding="utf-8")
+        cls.asset_catalog = (SCRIPTS / "AssetCatalog.cs").read_text(encoding="utf-8")
+        cls.prefab_resolver = (SCRIPTS / "PrefabResolver.cs").read_text(encoding="utf-8")
 
     def test_runtime_reports_the_four_policy_hard_checks(self):
         for check_id in (
@@ -48,6 +51,12 @@ class GodotTemplateTests(unittest.TestCase):
 
     def test_capture_is_fixed_camera_hashed_and_rejects_uniform_frames(self):
         self.assertIn('OS.GetEnvironment("PTP_CAPTURE")', self.runtime)
+        self.assertIn("if (!_worldBuilt)", self.runtime)
+        self.assertIn("GetTree().Quit(_exitCode);", self.runtime)
+        self.assertLess(
+            self.runtime.index("else if (captureRequested)"),
+            self.runtime.index("else if (_exitCode != 0)"),
+        )
         self.assertIn("HasVisualVariation(image)", self.runtime)
         self.assertIn("SHA256.HashData", self.runtime)
         self.assertIn("capture_manifest.json", self.artifacts)
@@ -58,6 +67,37 @@ class GodotTemplateTests(unittest.TestCase):
         self.assertIn('OS.GetEnvironment("PTP_REVISION")', self.artifacts)
         self.assertIn('rev_{Revision}', self.artifacts)
         self.assertIn("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", self.artifacts)
+
+    def test_asset_catalog_template_is_empty_valid_and_versioned(self):
+        catalog = json.loads(
+            (TEMPLATE / "assets" / "catalog.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(catalog["schema"], "prompt-to-play/asset-catalog@1")
+        self.assertEqual(catalog["assets"], [])
+        self.assertIn('CatalogPath = "res://assets/catalog.json"', self.asset_catalog)
+        self.assertIn("StringComparer.Ordinal", self.asset_catalog)
+
+    def test_prefab_resolver_safely_loads_glb_before_primitive_fallback(self):
+        self.assertIn("GD.Load<PackedScene>(entry.ScenePath)", self.prefab_resolver)
+        self.assertIn('AssetRoot = "res://assets/"', self.prefab_resolver)
+        self.assertIn('EndsWith(".glb"', self.prefab_resolver)
+        self.assertIn("sceneRoot.Scale = Multiply(sceneRoot.Scale, requestedScale)", self.prefab_resolver)
+        self.assertIn("ShadowCastingSetting.On", self.prefab_resolver)
+        self.assertIn("CreateTrimeshShape", self.prefab_resolver)
+        self.assertIn('entityRoot.SetMeta("asset_scene_path"', self.prefab_resolver)
+        resolver_call = self.runtime.index("_prefabResolver.TryInstantiate(")
+        primitive_branch = self.runtime.index('token.Contains("tree")', resolver_call)
+        self.assertLess(resolver_call, primitive_branch)
+        self.assertIn('_primitiveFallbackIds.Add(stableId)', self.runtime)
+
+    def test_interactables_try_catalog_assets_before_glow_primitive(self):
+        start = self.runtime.index("private void BuildInteractables()")
+        section = self.runtime[start:self.runtime.index("private void BuildExit()", start)]
+        self.assertLess(
+            section.index("_prefabResolver.TryInstantiate("),
+            section.index("PrimitiveFactory.AddSphereVisual("),
+        )
+        self.assertIn('_primitiveFallbackIds.Add(spec.Id)', section)
 
     def test_template_contains_no_local_build_cache(self):
         forbidden_parts = {".godot", "bin", "obj", "artifacts"}

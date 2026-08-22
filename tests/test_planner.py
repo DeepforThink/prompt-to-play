@@ -1,11 +1,13 @@
 import base64
 import copy
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from urllib import error as urlerror
 from unittest import mock
 
 from prompt_to_play import contracts, planner, provider
@@ -134,6 +136,68 @@ class ProviderConfigTests(unittest.TestCase):
 
 
 class HttpProviderTests(unittest.TestCase):
+    def test_http_error_body_is_never_exposed(self):
+        failure = urlerror.HTTPError(
+            "https://example.invalid/v1/responses",
+            401,
+            "unauthorized",
+            {},
+            io.BytesIO(b"echoed sk-sensitive-value and private prompt"),
+        )
+        with mock.patch.object(provider.request, "urlopen", side_effect=failure):
+            with self.assertRaises(provider.ProviderRequestError) as raised:
+                provider._default_transport(
+                    "https://example.invalid/v1/responses",
+                    {"Authorization": "Bearer sk-sensitive-value"},
+                    b"{}",
+                    1,
+                )
+        self.assertEqual(str(raised.exception), "provider HTTP 401")
+
+    def test_usage_summary_reads_chat_and_responses_token_fields(self):
+        responses = [
+            {
+                "model": "served-model",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                },
+            },
+            {
+                "model": "served-model",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 10,
+                    "input_tokens_details": {"cached_tokens": 5},
+                },
+            },
+        ]
+
+        def transport(*_args):
+            return json.dumps(responses.pop(0)).encode("utf-8")
+
+        client = provider.OpenAICompatibleProvider(
+            provider.ProviderConfig(api_key="secret", model="requested-model"),
+            transport=transport,
+        )
+        for _ in range(2):
+            client.generate_json(
+                [{"role": "user", "content": "json"}],
+                json_schema={"type": "object"},
+                schema_name="result",
+            )
+        usage = client.usage_summary()
+        self.assertEqual(usage.model, "served-model")
+        self.assertEqual(usage.calls, 2)
+        self.assertEqual(usage.input_tokens, 170)
+        self.assertEqual(usage.cached_input_tokens, 45)
+        self.assertEqual(usage.output_tokens, 40)
+        self.assertEqual(usage.total_tokens, 210)
+        self.assertTrue(usage.exact)
+
     def test_chat_completions_payload_and_structured_response(self):
         captured = {}
 
@@ -290,6 +354,35 @@ class HttpProviderTests(unittest.TestCase):
 
 
 class CodexCliProviderTests(unittest.TestCase):
+    def test_codex_usage_preserves_reported_total_without_claiming_exact_split(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def runner(command, **_kwargs):
+                output_path = Path(command[command.index("-o") + 1])
+                output_path.write_text('{"ok":true}', encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "",
+                    "model: gpt-test\ntokens used: 1,234\n",
+                )
+
+            client = provider.CodexCliProvider(
+                provider.CodexCliConfig(command="codex", repo=root),
+                runner=runner,
+            )
+            client.generate_json(
+                [{"role": "user", "content": "json"}],
+                json_schema={"type": "object"},
+                schema_name="result",
+            )
+            usage = client.usage_summary()
+            self.assertEqual(usage.model, "gpt-test")
+            self.assertEqual(usage.calls, 1)
+            self.assertEqual(usage.total_tokens, 1234)
+            self.assertFalse(usage.exact)
+
     def test_codex_command_is_ephemeral_read_only_structured_and_sends_each_image(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

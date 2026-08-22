@@ -23,29 +23,38 @@ limit belong to the versioned evaluation policy; they are not user inputs.
 prompt + references
         |
         v
-planner / reference interpreter
+WorldPlannerAgent (structured model API)
         |
         v
 validated WorldSpec
         |
         v
-deterministic Godot world compiler
+AssetAgent -> image API -> Tripo3D API -> content-addressed GLB cache
         |
         v
-structural evaluation -> fixed-camera capture -> six-metric evaluation
+Godot BuildExecutor (catalog assets first, primitive last fallback)
+        |
+        v
+structural checks -> fixed-camera capture -> VisualEvaluationAgent
         |                                      |
-        | pass                                 | issues
+        | accept                               | issues
         v                                      v
-      accept                         feedback Agent -> PatchSpec
+  best-revision selection          RepairAgent -> revised WorldSpec
                                                    |
-                                                   +----> rebuild
+                                      host derives PatchSpec
+                                                   |
+                                                   +----> assets/build/capture
 ```
 
-The evaluator never edits the world. The feedback Agent receives stable issue
-codes, affected IDs, the relevant screenshots, and the current WorldSpec. It
-may return only allowlisted, stable-ID patch operations. A stale patch hash is
-rejected. The workflow keeps the best revision and permits at most two
-correction rounds after the initial build.
+The three model roles have isolated contexts, role-specific model settings,
+strict JSON schemas, and trace entries. AssetAgent is a separate bounded tool
+worker with its own asset manifest rather than a fictitious model session. The
+visual evaluator cannot edit the world or
+decide Token, timing, or aggregate metrics. RepairAgent returns a complete
+candidate WorldSpec; the host validates it and deterministically derives only
+allowlisted stable-ID PatchSpec operations. A stale patch hash is rejected. The
+workflow keeps the best revision and permits at most two correction rounds
+after the initial build.
 
 ## Generality boundary
 
@@ -60,9 +69,13 @@ mapped onto a small reusable runtime vocabulary:
 - a final reachable completion area
 
 Objectives combine interactables with `all`, `any`, or `sequence`. Known
-logical prefab IDs may resolve to authored assets; unknown IDs receive a
-deterministic primitive fallback so a new prompt still produces a playable
-world instead of failing on a missing model.
+logical prefab IDs are sent through AssetAgent. It first reuses the
+content-addressed cache and, when the host has explicitly enabled paid API
+generation, creates a reference image and converts it to a PBR GLB. Godot loads
+the strict catalog entry, while unresolved IDs receive a deterministic
+primitive fallback so a new prompt still produces a playable world instead of
+failing on a missing model. Its paid-attempt limit is shared by the full run,
+not reset for each correction revision.
 
 Regions also drive a deterministic PCG decoration pass. Semantic region and
 theme tokens select vegetation, ruin, industrial, or generic primitive
@@ -86,12 +99,16 @@ The six course metrics are represented directly:
 | Automation loop | Versioned plan, evaluation, patch, rebuild, and selection records |
 | Generation speed | Measured stage and total elapsed time |
 | Token efficiency | Recorded model calls and input/output token counts |
-| Reproducibility | Request, WorldSpec, seed, manifest, and transform hashes |
+| Reproducibility | Exact Godot source hash on the first run; exact WorldSpec comparison with prior runs of the same request thereafter |
 
-Each run retains its request, WorldSpec, build manifest, structural report,
-evaluation, patches, screenshots, proof video, tool versions, elapsed time, and
-model usage. A good-looking screenshot cannot override a failed structural hard
-gate.
+Each run retains its request, every WorldSpec revision, asset catalog and rich
+asset manifest, build manifest, structural report, visual feedback, scored
+evaluation, patches, screenshots, best-revision selection, elapsed time, and
+per-agent model/Token trace. A good-looking screenshot cannot override a failed
+structural hard gate. Original reference images are attached before generated
+screenshots for both visual evaluation and repair, with explicit image counts
+so the evaluator can compare against the actual references rather than path
+names alone.
 
 Operational `PTP_RUN_ID` and `PTP_REVISION` values only select immutable
 evidence directories; revision is restricted to the initial build plus two

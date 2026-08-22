@@ -145,6 +145,40 @@ class ProviderConfig:
         )
 
 
+@dataclass(frozen=True)
+class ProviderUsage:
+    """Sanitized token accounting for one or more structured model calls."""
+
+    backend: str
+    model: str
+    calls: int = 0
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    exact: bool = False
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+def _combine_usage(
+    records: Sequence[ProviderUsage], *, backend: str, model: str
+) -> ProviderUsage:
+    if not records:
+        return ProviderUsage(backend=backend, model=model)
+    models = sorted({record.model for record in records if record.model})
+    return ProviderUsage(
+        backend=backend,
+        model="+".join(models) or model,
+        calls=sum(record.calls for record in records),
+        input_tokens=sum(record.input_tokens for record in records),
+        cached_input_tokens=sum(record.cached_input_tokens for record in records),
+        output_tokens=sum(record.output_tokens for record in records),
+        exact=all(record.exact for record in records),
+    )
+
+
 def _default_transport(
     url: str,
     headers: Mapping[str, str],
@@ -156,9 +190,10 @@ def _default_transport(
         with request.urlopen(outgoing, timeout=timeout_seconds) as response:
             return response.read()
     except error.HTTPError as exc:
-        detail = exc.read(4096).decode("utf-8", errors="replace").strip()
-        suffix = f": {detail}" if detail else ""
-        raise ProviderRequestError(f"provider HTTP {exc.code}{suffix}") from exc
+        # Compatible endpoints sometimes echo request headers or submitted
+        # content in error bodies. Never propagate that untrusted body into UI
+        # logs or Agent traces, where credentials or prompts could leak.
+        raise ProviderRequestError(f"provider HTTP {exc.code}") from exc
     except error.URLError as exc:
         raise ProviderRequestError(f"provider request failed: {exc.reason}") from exc
     except OSError as exc:
@@ -193,6 +228,61 @@ class OpenAICompatibleProvider:
     ) -> None:
         self.config = ProviderConfig.from_env() if config is None else config
         self._transport = _default_transport if transport is None else transport
+        self._usage_records: list[ProviderUsage] = []
+
+    def usage_summary(self) -> ProviderUsage:
+        return _combine_usage(
+            self._usage_records,
+            backend="openai-compatible",
+            model=self.config.model,
+        )
+
+    def _record_usage(self, response: Mapping[str, Any]) -> None:
+        usage = response.get("usage")
+        if not isinstance(usage, Mapping):
+            self._usage_records.append(
+                ProviderUsage(
+                    backend="openai-compatible",
+                    model=self.config.model,
+                    calls=1,
+                )
+            )
+            return
+
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        output_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        details = usage.get(
+            "prompt_tokens_details",
+            usage.get("input_tokens_details", {}),
+        )
+        cached_tokens = (
+            details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+        )
+        values = (input_tokens, output_tokens, cached_tokens)
+        exact = all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in values
+        )
+        if not exact:
+            input_tokens = output_tokens = cached_tokens = 0
+        cached_tokens = min(int(cached_tokens), int(input_tokens))
+        response_model = response.get("model")
+        model = (
+            response_model
+            if isinstance(response_model, str) and response_model.strip()
+            else self.config.model
+        )
+        self._usage_records.append(
+            ProviderUsage(
+                backend="openai-compatible",
+                model=model,
+                calls=1,
+                input_tokens=int(input_tokens),
+                cached_input_tokens=cached_tokens,
+                output_tokens=int(output_tokens),
+                exact=exact,
+            )
+        )
 
     def _endpoint(self) -> str:
         suffix = (
@@ -407,7 +497,9 @@ class OpenAICompatibleProvider:
             ) from exc
         if not isinstance(response, dict):
             raise ProviderResponseError("provider response must be a JSON object")
-        return self._extract_structured(response, self.config.api_style)
+        document = self._extract_structured(response, self.config.api_style)
+        self._record_usage(response)
+        return document
 
 
 @dataclass(frozen=True)
@@ -552,6 +644,37 @@ class CodexCliProvider:
             shutil.which if powershell_finder is None else powershell_finder
         )
         self._is_windows = os.name == "nt" if windows is None else windows
+        self._usage_records: list[ProviderUsage] = []
+
+    def usage_summary(self) -> ProviderUsage:
+        return _combine_usage(
+            self._usage_records,
+            backend="codex-cli",
+            model="codex-cli",
+        )
+
+    def _record_usage(self, stderr: str) -> None:
+        model_match = re.search(r"(?im)^model:\s*([^\s]+)", stderr or "")
+        token_match = re.search(
+            r"(?im)tokens\s+used\s*[:=]?\s*([0-9][0-9,]*)",
+            stderr or "",
+        )
+        model = model_match.group(1) if model_match else "codex-cli"
+        total = (
+            int(token_match.group(1).replace(",", "")) if token_match else 0
+        )
+        # Codex CLI exposes a combined total in human-readable diagnostics, not
+        # a stable input/output split. Preserve that measured total without
+        # inventing additional tokens; ``exact`` remains false for this reason.
+        self._usage_records.append(
+            ProviderUsage(
+                backend="codex-cli",
+                model=model,
+                calls=1,
+                input_tokens=total,
+                exact=False,
+            )
+        )
 
     def _run(
         self, argv: Sequence[str], prompt: str
@@ -741,6 +864,7 @@ class CodexCliProvider:
                 raise ProviderResponseError(
                     "codex structured output must be a JSON object"
                 )
+            self._record_usage(completed.stderr)
             return document
 
 

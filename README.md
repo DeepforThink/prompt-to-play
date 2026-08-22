@@ -9,11 +9,12 @@ The floating mechanical city in `prompt_to_play/examples/` is only one acceptanc
 - A versioned, engine-independent `WorldSpec`, `PatchSpec`, evaluation policy, and validator.
 - A reusable Godot 4.7 C# scaffold that builds regions, roads, buildings, props, lights, fixed cameras, generic interactables, objectives, and a reachable exit from data.
 - A desktop launcher where the player enters an arbitrary prompt and optional reference images, then watches Plan -> Validate -> Publish -> Build -> Play run off the UI thread.
-- A structured planner with two interchangeable backends: an OpenAI-compatible API or the user's existing Codex CLI login (the zero-key default on this Windows setup).
-- Deterministic primitive fallbacks for unknown logical prefab IDs, so unfamiliar prompts remain playable without paid assets.
+- An API-first multi-agent runtime with three isolated model roles—WorldPlanner, VisualEvaluation, and Repair—using strict JSON hand-offs, per-call hashes, timing, model, and Token traces.
+- A separate AssetAgent tool worker that turns semantic prefab requests into cached API-generated GLBs, plus a strict Godot catalog and deterministic primitive fallback when an asset is unresolved.
+- A Godot PrefabResolver that loads real `.glb`/`.gltf` scenes, enables shadows and collision, and records whether each entity used a catalog asset or fallback geometry.
 - WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
 - Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
-- A constrained feedback contract: stable-ID patches, exact base hashes, allowlisted fields, at most two correction rounds, and best-revision rollback.
+- An implemented screenshot feedback loop: VisualEvaluationAgent judges fixed-camera renders, RepairAgent returns a validated revision, the host derives a stable-ID PatchSpec, and the system performs at most two correction rounds before selecting the best revision.
 - A cross-platform publisher and Python CI matrix for Windows and Linux.
 
 The host Agent performs prompt/reference interpretation and visual judgement. The repository supplies its runtime protocol, deterministic execution layer, contracts, evidence format, and correction guardrails. The scope is prompt-conditioned explorable 3D worlds, not arbitrary game genres or photorealistic reconstruction.
@@ -33,11 +34,16 @@ Prerequisites are Python 3.11+, the .NET 8 SDK, and the .NET build of Godot 4.7.
 
 ### Enter a prompt and play
 
-On Windows, the shortest complete path is:
+On Windows, the complete path with realistic API-generated assets is the masked
+launcher (it prompts locally for the three required credentials):
 
 ```powershell
-python -m prompt_to_play.pipeline
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ImageProvider gemini
 ```
+
+The launcher defaults all three model roles to `gpt-5.6-sol`; override it with
+`-Model <model-id>`. To run with only the model API and accept primitive asset
+fallbacks, add `-AssetMode off`; that mode prompts for only the OpenAI key.
 
 Enter any world description, optionally add reference images, and choose
 `生成并启动`. The launcher performs structured planning, contract validation,
@@ -47,12 +53,23 @@ opens the playable game. Every run gets its own project under
 cannot overwrite a game that is still open. The example worlds are never used
 as runtime fallbacks.
 
-The default provider mode is `auto`: use `OPENAI_API_KEY` (or
-`PROMPT_TO_PLAY_API_KEY`) when present, otherwise reuse a signed-in `codex` CLI.
-Set `PROMPT_TO_PLAY_PROVIDER=openai` or `codex` to force a backend. The Codex
-backend attaches every selected image to the planning request; the generic HTTP
-adapter requires textual image summaries rather than pretending it inspected
-image bytes.
+If the required environment variables are already configured, the GUI can also
+be started with `python -m prompt_to_play.pipeline`. The interactive multi-agent runtime is API-first and requires
+`PROMPT_TO_PLAY_API_KEY` (or `OPENAI_API_KEY`). It sends selected reference
+images and generated screenshots as real image inputs. A signed-in Codex CLI is
+kept only as an explicitly selected development fallback by setting
+`PROMPT_TO_PLAY_PROVIDER=codex`.
+
+For the complete realistic-asset path, configure an image provider key
+(`GEMINI_API_KEY`/`GOOGLE_API_KEY` or `XAI_API_KEY`) and
+`TRIPO3D_API_KEY`, then set `PROMPT_TO_PLAY_ASSET_MODE=auto`. Asset generation
+is paid and therefore defaults to `off`; cache hits remain available in every
+mode. The Windows launcher above does not write keys to disk, logs,
+command-line arguments, or Git.
+
+Do not paste API keys into source files or chat messages. The script places
+them only in the launched process environment and removes its own copies after
+startup.
 
 Player controls are WASD + mouse, Space to jump, and E to interact. Seed, time,
 Token use, thresholds, and correction limits are not fields in this launcher:
@@ -115,7 +132,10 @@ CPU-only execution is sufficient for contract validation, compilation, headless 
 - `prompt_to_play/contracts.py` — validation, canonical hashes, policy scoring, and safe patch application.
 - `prompt_to_play/lifecycle.py` — canonical request creation and deterministic best-revision selection.
 - `prompt_to_play/provider.py` — Codex CLI and OpenAI-compatible structured-output adapters.
+- `prompt_to_play/agents.py` — isolated API-agent sessions, role-specific models, Token accounting, and auditable traces.
 - `prompt_to_play/planner.py` — arbitrary prompt/reference planning into a validated WorldSpec.
+- `prompt_to_play/assets.py` — AssetAgent requests, paid API opt-in, content-addressed GLB cache, catalog, and manifest.
+- `prompt_to_play/evaluator.py` — VisualEvaluationAgent, RepairAgent, and deterministic WorldSpec-to-PatchSpec diff.
 - `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.
 - `prompt_to_play/pipeline.py` — concrete planning, publishing, build, structural-check, and launch stages.
 - `prompt_to_play/evaluation_policy.json` — internal evaluation configuration.

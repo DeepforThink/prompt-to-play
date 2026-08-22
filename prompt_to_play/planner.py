@@ -224,7 +224,11 @@ Rules:
 - Treat roads as an undirected traversal graph: every region must be reachable from player_spawn.region. Do not leave decorative regions disconnected.
 - Include at least one evaluation camera whose kind is fixed or orbit. A player-only camera is insufficient for capture and evaluation.
 - An objective targets interactable IDs. exit.requires contains objective IDs, never interactable IDs.
-- Use repository-relative prefab paths with forward slashes and no '..'.
+- Use concise semantic prefab IDs formatted like repository-relative paths with
+  forward slashes and no '..' (for example props/rusty_generator). Reuse the
+  same ID for repeated instances of the same visual asset.
+- Placement scale is a multiplier applied to an auto-sized game asset. Prefer
+  [1, 1, 1] unless the prompt clearly calls for a deliberate size variation.
 - The caller owns schema, brief, and seed; reproduce the supplied authoritative values exactly.
 - Do not add evaluation policy, token limits, time limits, prose, or Markdown.
 """

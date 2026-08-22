@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from prompt_to_play import contracts, pipeline
+from prompt_to_play import agents, contracts, pipeline
 from prompt_to_play.launcher import LaunchRequest, PipelineState
 
 
@@ -119,6 +119,36 @@ class PipelineStageTests(unittest.TestCase):
         state.set_result(pipeline.WORLD_RESULT, world)
         stages.validate(state, lambda _message: None)
         self.assertEqual(checked, [world])
+
+    def test_asset_api_budget_is_shared_across_revisions(self):
+        stages = pipeline.PipelineStages(
+            pipeline.PipelineDependencies(
+                environment={
+                    "PROMPT_TO_PLAY_ASSET_MODE": "auto",
+                    "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS": "3",
+                }
+            )
+        )
+        state = PipelineState(LaunchRequest.from_values("world"))
+        self.assertEqual(
+            stages._asset_environment(state)[
+                "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS"
+            ],
+            "3",
+        )
+        state.set_result(
+            pipeline.ASSET_RESULTS_RESULT,
+            [
+                SimpleNamespace(attempted_generations=2),
+                SimpleNamespace(attempted_generations=1),
+            ],
+        )
+        self.assertEqual(
+            stages._asset_environment(state)[
+                "PROMPT_TO_PLAY_ASSET_MAX_GENERATIONS"
+            ],
+            "0",
+        )
 
     def test_publish_uses_hash_target_copies_references_and_writes_world(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -401,6 +431,280 @@ class PipelineStageTests(unittest.TestCase):
             self.assertIsNone(pipeline._find_nupkgs(godot))
             (adjacent / "Godot.NET.Sdk.4.7.1.nupkg").write_bytes(b"package")
             self.assertEqual(pipeline._find_nupkgs(godot), adjacent.resolve())
+
+    def test_api_multi_agent_loop_captures_repairs_and_selects_best_revision(self):
+        class PlannerProvider:
+            def generate_json(self, *_args, **_kwargs):
+                return copy.deepcopy(read_fixture_world())
+
+        class VisualProvider:
+            def __init__(self):
+                self.calls = 0
+                self.image_paths = []
+
+            def generate_json(self, *_args, **kwargs):
+                self.calls += 1
+                self.image_paths.append(list(kwargs["image_paths"]))
+                if self.calls == 1:
+                    return {
+                        "scene_similarity": 0.5,
+                        "accepted": False,
+                        "issues": [
+                            {
+                                "code": "landmark_too_small",
+                                "severity": "major",
+                                "entity_id": None,
+                                "message": "The main landmark is visually weak.",
+                                "suggested_fix": "Move the first building closer to the overview camera.",
+                            }
+                        ],
+                    }
+                return {
+                    "scene_similarity": 0.9,
+                    "accepted": True,
+                    "issues": [],
+                }
+
+        class RepairProvider:
+            payloads = []
+
+            def generate_json(self, messages, **_kwargs):
+                payload = json.loads(messages[-1]["content"])
+                self.payloads.append(payload)
+                revised = copy.deepcopy(payload["current_world"])
+                revised["props"][0]["position"][0] += 1
+                return revised
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            source_repo = workspace / "prompt-to-play"
+            (source_repo / "prompt_to_play").mkdir(parents=True)
+            (source_repo / "prompt_to_play" / "evaluation_policy.json").write_text(
+                (ROOT / "prompt_to_play" / "evaluation_policy.json").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            output_root = workspace / "output" / "generated"
+            reference = workspace / "reference.png"
+            reference.write_bytes(b"reference pixels")
+
+            dotnet = workspace / ".tools" / "dotnet-sdk" / "dotnet.exe"
+            godot = workspace / ".tools" / "godot" / "Godot_v4_console.exe"
+            godot_visible = workspace / ".tools" / "godot" / "Godot_v4.exe"
+            feed = godot.parent / "GodotSharp" / "Tools" / "nupkgs"
+            dotnet.parent.mkdir(parents=True)
+            feed.mkdir(parents=True)
+            dotnet.write_bytes(b"exe")
+            godot.write_bytes(b"exe")
+            godot_visible.write_bytes(b"exe")
+            (feed / "Godot.NET.Sdk.4.7.1.nupkg").write_bytes(b"package")
+
+            role_providers = {
+                agents.AgentRole.WORLD_PLANNER: PlannerProvider(),
+                agents.AgentRole.VISUAL_EVALUATOR: VisualProvider(),
+                agents.AgentRole.REPAIR: RepairProvider(),
+            }
+
+            def runtime_factory(repo, environment):
+                return agents.MultiAgentRuntime(
+                    repo,
+                    environment=environment,
+                    provider_factory=lambda role, _environment, _repo: role_providers[
+                        role
+                    ],
+                )
+
+            def fake_publish(target):
+                (target / "spec").mkdir(parents=True)
+                (target / "assets").mkdir()
+                (target / "scenes").mkdir()
+                (target / "scenes" / "Main.tscn").write_text(
+                    "[gd_scene format=3]\n", encoding="utf-8"
+                )
+                return target
+
+            initial_prop_x = read_fixture_world()["props"][0]["position"][0]
+
+            def fake_run(argv, cwd, environment, _log):
+                revision = int(environment["PTP_REVISION"])
+                revision_dir = (
+                    cwd
+                    / "artifacts"
+                    / "runs"
+                    / environment["PTP_RUN_ID"]
+                    / f"rev_{revision}"
+                )
+                if "--headless" in argv:
+                    revision_dir.mkdir(parents=True, exist_ok=True)
+                    current_world = json.loads(
+                        (cwd / "spec" / "world.json").read_text(encoding="utf-8")
+                    )
+                    collision_repaired = (
+                        current_world["props"][0]["position"][0] > initial_prop_x
+                    )
+                    checks = [
+                        {
+                            "id": check_id,
+                            "kind": "hard",
+                            "passed": collision_repaired
+                            if check_id == "walkable_collision"
+                            else True,
+                            "score": (
+                                1
+                                if check_id != "walkable_collision"
+                                or collision_repaired
+                                else 0
+                            ),
+                            "message": (
+                                "Move the blocking prop away from the walkway"
+                                if check_id == "walkable_collision"
+                                and not collision_repaired
+                                else f"{check_id} passed"
+                            ),
+                            "evidence": [],
+                        }
+                        for check_id in (
+                            "scene_loads",
+                            "world_graph_connected",
+                            "objectives_completable",
+                            "completion_reachable",
+                            "walkable_collision",
+                        )
+                    ]
+                    structural_passed = all(check["passed"] for check in checks)
+                    (revision_dir / "structural_report.json").write_text(
+                        json.dumps(
+                            {
+                                "status": "pass" if structural_passed else "fail",
+                                "world_source_sha256": contracts.document_sha256(
+                                    current_world
+                                ),
+                                "checks": checks,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    if not structural_passed:
+                        raise pipeline.PipelineIntegrationError(
+                            "simulated Godot structural exit"
+                        )
+                elif environment.get("PTP_CAPTURE") == "1":
+                    capture = revision_dir / "captures" / "overview.png"
+                    capture.parent.mkdir(parents=True, exist_ok=True)
+                    capture.write_bytes(b"fake png")
+                    relative = capture.relative_to(cwd).as_posix()
+                    (revision_dir / "capture_manifest.json").write_text(
+                        json.dumps(
+                            {
+                                "schema": "prompt-to-play/capture-manifest@1",
+                                "run_id": environment["PTP_RUN_ID"],
+                                "revision": revision,
+                                "world_id": json.loads(
+                                    (cwd / "spec" / "world.json").read_text(
+                                        encoding="utf-8"
+                                    )
+                                )["world_id"],
+                                "captures": [
+                                    {
+                                        "path": relative,
+                                        "sha256": pipeline._sha256_file(capture),
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    current_world = json.loads(
+                        (cwd / "spec" / "world.json").read_text(encoding="utf-8")
+                    )
+                    if current_world["props"][0]["position"][0] <= initial_prop_x:
+                        raise pipeline.PipelineIntegrationError(
+                            "simulated structural exit after successful capture"
+                        )
+
+            stages = pipeline.PipelineStages(
+                pipeline.PipelineDependencies(
+                    source_repo_root=source_repo,
+                    output_root=output_root,
+                    environment={"PROMPT_TO_PLAY_ASSET_MODE": "off"},
+                    publish_project=fake_publish,
+                    run_command=fake_run,
+                    agent_runtime_factory=runtime_factory,
+                    which=lambda _name: None,
+                )
+            )
+            state = PipelineState(
+                LaunchRequest.from_values("生成一座可修复的森林遗迹", [reference])
+            )
+            stages.plan(state, lambda _message: None)
+            stages.validate(state, lambda _message: None)
+            stages.publish(state, lambda _message: None)
+            original_x = state.require_result(pipeline.WORLD_RESULT)["props"][0][
+                "position"
+            ][0]
+            stages.build(state, lambda _message: None)
+
+            project = state.require_result(pipeline.PROJECT_RESULT)
+            request_hash = state.require_result(pipeline.REQUEST_RESULT)["request_hash"]
+            run_id = request_hash[:12]
+            self.assertEqual(
+                state.require_result(pipeline.SELECTED_REVISION_RESULT), 1
+            )
+            self.assertEqual(
+                state.require_result(pipeline.WORLD_RESULT)["props"][0][
+                    "position"
+                ][0],
+                original_x + 1,
+            )
+            self.assertTrue(
+                (
+                    project
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / "rev_0"
+                    / "patch_to_rev_1.json"
+                ).is_file()
+            )
+            evaluations = state.require_result(pipeline.EVALUATIONS_RESULT)
+            self.assertEqual([item["iteration"] for item in evaluations], [0, 1])
+            self.assertEqual([item["status"] for item in evaluations], ["fail", "pass"])
+            self.assertEqual(evaluations[1]["metrics"]["reproducibility"], 0.5)
+            visual_provider = role_providers[agents.AgentRole.VISUAL_EVALUATOR]
+            published_reference = next((project / "references").iterdir()).resolve()
+            self.assertEqual(
+                visual_provider.image_paths[0][0], published_reference
+            )
+            self.assertEqual(len(visual_provider.image_paths[0]), 2)
+            repair_payload = RepairProvider.payloads[0]
+            self.assertEqual(
+                repair_payload["structural_failures"],
+                [
+                    {
+                        "id": "walkable_collision",
+                        "message": "Move the blocking prop away from the walkway",
+                    }
+                ],
+            )
+            self.assertEqual(repair_payload["reference_image_count"], 1)
+            trace = json.loads(
+                (project / "artifacts" / "runs" / run_id / "agent_trace.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [call["role"] for call in trace["calls"]],
+                ["world_planner", "visual_evaluator", "repair", "visual_evaluator"],
+            )
+            future_project = project.parent / "run-ffffffffffff"
+            future_project.mkdir()
+            self.assertEqual(
+                pipeline._prior_world_hashes(future_project, request_hash),
+                frozenset(
+                    {contracts.document_sha256(state.require_result(pipeline.WORLD_RESULT))}
+                ),
+            )
 
 
 class SubprocessBoundaryTests(unittest.TestCase):
