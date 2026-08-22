@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<p><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a></p>
+
 **Agent-driven generation, evaluation, and repair of playable Godot games**
 
 Turn a natural-language game brief into an editable Godot project with automated build checks, interaction probes, visual evaluation, iterative repair, and evidence-backed revision selection.
