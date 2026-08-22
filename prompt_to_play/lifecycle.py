@@ -25,7 +25,8 @@ except ImportError:  # pragma: no cover - exercised only by direct script use
 REQUEST_SCHEMA = "prompt-to-play/request@1"
 SELECTION_SCHEMA = "prompt-to-play/selection@1"
 EVALUATION_SCHEMA = "prompt-to-play/evaluation@1"
-SELECTION_STRATEGY = "hard-checks-then-weighted-score@1"
+SELECTION_STRATEGY = "passing-then-delivery-checks-then-weighted-score@1"
+VISUAL_CHECK_ID = "visual_prompt_gate"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -160,6 +161,7 @@ def _evaluation_summary(document: Any, source: str) -> dict[str, Any]:
     if not isinstance(checks, list) or not checks:
         _fail(f"{source}.checks", "expected a non-empty array")
     hard_results: list[bool] = []
+    delivery_results: list[bool] = []
     seen_check_ids: set[str] = set()
     for index, value in enumerate(checks):
         path = f"{source}.checks[{index}]"
@@ -176,6 +178,8 @@ def _evaluation_summary(document: Any, source: str) -> dict[str, Any]:
             _fail(f"{path}.passed", "expected a boolean")
         if kind == "hard":
             hard_results.append(passed)
+            if check_id != VISUAL_CHECK_ID:
+                delivery_results.append(passed)
     if not hard_results:
         _fail(f"{source}.checks", "at least one hard check is required")
 
@@ -195,6 +199,10 @@ def _evaluation_summary(document: Any, source: str) -> dict[str, Any]:
         "world_sha256": world_sha256,
         "iteration": iteration,
         "all_hard_checks_passed": all(hard_results),
+        "all_delivery_checks_passed": (
+            bool(delivery_results) and all(delivery_results)
+        ),
+        "evaluation_passed": result.get("passed") is True and all(hard_results),
         "weighted_score": weighted_score,
     }
 
@@ -203,7 +211,8 @@ def _rank_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
     """Lower tuple values are better; the last fields make ties deterministic."""
 
     return (
-        not candidate["all_hard_checks_passed"],
+        not candidate["evaluation_passed"],
+        not candidate["all_delivery_checks_passed"],
         -candidate["weighted_score"],
         candidate["iteration"],
         candidate["evaluation_sha256"],

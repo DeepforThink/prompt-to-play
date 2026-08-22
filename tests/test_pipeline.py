@@ -31,6 +31,48 @@ def planned_world(prompt, references):
     return world
 
 
+def delivery_evaluation(
+    *,
+    passed: bool,
+    visual_passed: bool = True,
+    failed_structural: str | None = None,
+):
+    checks = [
+        {
+            "id": check_id,
+            "kind": "hard",
+            "passed": check_id != failed_structural,
+            "score": 0 if check_id == failed_structural else 1,
+            "message": f"{check_id} result",
+            "evidence": [],
+        }
+        for check_id in sorted(pipeline.REQUIRED_DELIVERY_CHECKS)
+    ]
+    checks.append(
+        {
+            "id": pipeline.VISUAL_CHECK_ID,
+            "kind": "hard",
+            "passed": visual_passed,
+            "score": 0.4 if not visual_passed else 1,
+            "message": "visual result",
+            "evidence": ["captures/overview.png"],
+        }
+    )
+    return {
+        "schema": contracts.EVALUATION_SCHEMA,
+        "run_id": "run",
+        "world_id": "world",
+        "world_sha256": "a" * 64,
+        "checks": checks,
+        "result": {
+            "passed": passed,
+            "weighted_score": 0.8 if passed else 0.4,
+            "threshold": 0.7,
+        },
+        "issues": [],
+    }
+
+
 class FakeProcess:
     pid = 4242
 
@@ -463,7 +505,9 @@ class PipelineStageTests(unittest.TestCase):
                 pipeline.TOOLCHAIN_RESULT,
                 pipeline.Toolchain(godot, godot, project_dir),
             )
-            stages.launch(state, lambda _message: None)
+            state.set_result(pipeline.DELIVERY_RESULT, {"mode": "best_effort"})
+            messages = []
+            stages.launch(state, messages.append)
 
             argv, cwd, environment, log_path = captured[0]
             self.assertEqual(argv[0], str(godot))
@@ -481,6 +525,7 @@ class PipelineStageTests(unittest.TestCase):
             self.assertIsInstance(
                 state.require_result(pipeline.PROCESS_RESULT), FakeProcess
             )
+            self.assertTrue(any("best_effort" in message for message in messages))
 
     def test_launch_reports_an_early_godot_exit_and_log_tail(self):
         class ExitedProcess:
@@ -538,7 +583,7 @@ class PipelineStageTests(unittest.TestCase):
             (adjacent / "Godot.NET.Sdk.4.7.1.nupkg").write_bytes(b"package")
             self.assertEqual(pipeline._find_nupkgs(godot), adjacent.resolve())
 
-    def test_api_multi_agent_loop_captures_repairs_and_selects_best_revision(self):
+    def test_api_loop_keeps_last_valid_revision_when_next_repair_is_invalid(self):
         class PlannerProvider:
             def generate_json(self, *_args, **_kwargs):
                 return copy.deepcopy(read_fixture_world())
@@ -579,15 +624,24 @@ class PipelineStageTests(unittest.TestCase):
                     "camera_evaluations": [
                         {
                             "camera_id": "overview",
-                            "prompt_alignment": 0.9,
-                            "composition": 0.9,
-                            "lighting_materials": 0.9,
-                            "landmark_readability": 0.9,
-                            "camera_coverage": 0.9,
-                            "visible_defects": 0.1,
+                            "prompt_alignment": 0.5,
+                            "composition": 0.5,
+                            "lighting_materials": 0.5,
+                            "landmark_readability": 0.5,
+                            "camera_coverage": 0.5,
+                            "visible_defects": 0.5,
                         }
                     ],
-                    "issues": [],
+                    "issues": [
+                        {
+                            "code": "landmark_still_weak",
+                            "severity": "major",
+                            "entity_id": None,
+                            "camera_id": "overview",
+                            "message": "The repaired landmark is still visually weak.",
+                            "suggested_fix": "Increase its visual prominence.",
+                        }
+                    ],
                 }
 
         class RefinementProvider:
@@ -603,6 +657,8 @@ class PipelineStageTests(unittest.TestCase):
                 self.payloads.append(payload)
                 revised = copy.deepcopy(payload["current_world"])
                 revised["props"][0]["position"][0] += 1
+                if len(self.payloads) == 2:
+                    revised["roads"][0]["to"] = revised["roads"][0]["from"]
                 return revised
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -805,8 +861,20 @@ class PipelineStageTests(unittest.TestCase):
             )
             evaluations = state.require_result(pipeline.EVALUATIONS_RESULT)
             self.assertEqual([item["iteration"] for item in evaluations], [0, 1])
-            self.assertEqual([item["status"] for item in evaluations], ["fail", "pass"])
+            self.assertEqual([item["status"] for item in evaluations], ["fail", "fail"])
             self.assertEqual(evaluations[1]["metrics"]["reproducibility"], 0.5)
+            delivery = json.loads(
+                (project / "artifacts" / "runs" / run_id / "delivery.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(delivery["mode"], "best_effort")
+            self.assertFalse(delivery["evaluation_passed"])
+            self.assertEqual(delivery["revision"], 1)
+            self.assertEqual(
+                delivery["correction_stop"]["reason"], "repair_rejected"
+            )
+            self.assertIn("road endpoints", delivery["correction_stop"]["message"])
             visual_provider = role_providers[agents.AgentRole.VISUAL_EVALUATOR]
             published_reference = next((project / "references").iterdir()).resolve()
             self.assertEqual(
@@ -840,6 +908,7 @@ class PipelineStageTests(unittest.TestCase):
                     "visual_evaluator",
                     "repair",
                     "visual_evaluator",
+                    "repair",
                 ],
             )
             future_project = project.parent / "run-ffffffffffff"
@@ -851,18 +920,54 @@ class PipelineStageTests(unittest.TestCase):
                 ),
             )
 
-    def test_promotion_gate_refuses_to_launch_a_best_failing_revision(self):
+    def test_delivery_gate_accepts_passed_and_best_effort_revisions(self):
+        selection_path = Path("artifacts/runs/run/selection.json")
+        self.assertEqual(
+            pipeline._classify_delivery(
+                delivery_evaluation(passed=True), 1, selection_path
+            ),
+            "passed",
+        )
+        self.assertEqual(
+            pipeline._classify_delivery(
+                delivery_evaluation(passed=False, visual_passed=False),
+                2,
+                selection_path,
+            ),
+            "best_effort",
+        )
+        self.assertEqual(
+            pipeline._classify_delivery(
+                delivery_evaluation(passed=False), 2, selection_path
+            ),
+            "best_effort",
+        )
+
+    def test_delivery_gate_rejects_structural_and_malformed_revisions(self):
         selection_path = Path("artifacts/runs/run/selection.json")
         with self.assertRaisesRegex(
             pipeline.PipelineIntegrationError,
-            "no revision passed all evaluation gates.*revision 2",
+            "failed delivery-blocking checks: scene_loads",
         ):
-            pipeline._require_passing_selection(
-                {"result": {"passed": False}}, 2, selection_path
+            pipeline._classify_delivery(
+                delivery_evaluation(
+                    passed=False, failed_structural="scene_loads"
+                ),
+                2,
+                selection_path,
             )
-        pipeline._require_passing_selection(
-            {"result": {"passed": True}}, 1, selection_path
-        )
+        missing = delivery_evaluation(passed=False)
+        missing["checks"] = [
+            check for check in missing["checks"] if check["id"] != "scene_loads"
+        ]
+        with self.assertRaisesRegex(
+            pipeline.PipelineIntegrationError, "missing scene_loads"
+        ):
+            pipeline._classify_delivery(missing, 2, selection_path)
+        with self.assertRaisesRegex(
+            pipeline.PipelineIntegrationError, "no valid evaluation result"
+        ):
+            pipeline._classify_delivery({"result": {"passed": "no"}}, 2, selection_path)
 
 
 class SubprocessBoundaryTests(unittest.TestCase):

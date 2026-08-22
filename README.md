@@ -115,7 +115,7 @@ prompt + optional references
         -> Evaluate structure and fixed-camera evidence
         -> Visual Agent emits per-camera observations
         -> Host derives aggregate score, acceptance, and a validated repair patch
-        -> Rebuild and select a passing revision, or stop without launching
+        -> Rebuild and select a passing or structurally valid best-effort revision
 ```
 
 The run root records `refinement.json` with the Planner hash, every refinement
@@ -126,7 +126,10 @@ instance, and task. Headless execution writes the build manifest and structural 
 rejects empty or near-uniform frames, writes PNGs, and records their SHA-256
 digests in `capture_manifest.json`. Set `PTP_REVISION` to `1` or `2` only after
 a validated feedback patch; earlier evidence remains untouched. A generated
-project is launched only when the selected revision passes every hard gate.
+project launches when the selected revision passes every structural delivery
+gate. A fully passing evaluation is preferred; otherwise `delivery.json` marks
+the highest-ranked structurally valid revision as `best_effort` and retains its
+visual failures, score gap, remaining issues, and correction-stop evidence.
 
 ## Contracts and tests
 

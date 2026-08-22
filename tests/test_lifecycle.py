@@ -212,6 +212,43 @@ class RevisionSelectionTests(unittest.TestCase):
         self.assertNotIn("timing_ms", selection["selected"])
         self.assertNotIn("tokens", selection["selected"])
 
+    def test_delivery_safe_revision_outranks_structural_failure(self):
+        structurally_failed = evaluation(
+            source_marker="a", iteration=0, hard_passed=False, weighted_score=0.99
+        )
+        visual_failure = evaluation(
+            source_marker="b", iteration=1, hard_passed=True, weighted_score=0.4
+        )
+        visual_failure["checks"].append(
+            {
+                "id": lifecycle.VISUAL_CHECK_ID,
+                "kind": "hard",
+                "passed": False,
+            }
+        )
+        selection = lifecycle.select_best_revision(
+            [
+                ("structural.json", structurally_failed),
+                ("visual.json", visual_failure),
+            ]
+        )
+        self.assertEqual(selection["selected"]["source"], "visual.json")
+        self.assertTrue(selection["selected"]["all_delivery_checks_passed"])
+
+    def test_fully_passing_revision_outranks_best_effort_score(self):
+        best_effort = evaluation(
+            source_marker="a", iteration=0, hard_passed=True, weighted_score=0.99
+        )
+        passed = evaluation(
+            source_marker="b", iteration=1, hard_passed=True, weighted_score=0.7
+        )
+        passed["result"]["passed"] = True
+        selection = lifecycle.select_best_revision(
+            [("best-effort.json", best_effort), ("passed.json", passed)]
+        )
+        self.assertEqual(selection["selected"]["source"], "passed.json")
+        self.assertTrue(selection["selected"]["evaluation_passed"])
+
     def test_tie_break_is_stable_and_independent_of_argument_order(self):
         iteration_one = evaluation(
             source_marker="a", iteration=1, hard_passed=True, weighted_score=0.8

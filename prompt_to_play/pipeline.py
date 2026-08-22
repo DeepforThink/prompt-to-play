@@ -54,7 +54,19 @@ ASSET_RESULTS_RESULT = "asset_agent_results"
 REFINEMENT_RESULT = "refinement"
 EVALUATIONS_RESULT = "evaluations"
 SELECTED_REVISION_RESULT = "selected_revision"
+DELIVERY_RESULT = "delivery"
 TIMING_RESULT = "timing_ms"
+
+DELIVERY_SCHEMA = "prompt-to-play/delivery@1"
+VISUAL_CHECK_ID = "visual_prompt_gate"
+REQUIRED_DELIVERY_CHECKS = frozenset(
+    {
+        "scene_loads",
+        "world_graph_connected",
+        "objectives_completable",
+        "completion_reachable",
+    }
+)
 
 
 class PipelineIntegrationError(RuntimeError):
@@ -502,17 +514,110 @@ def _build_evaluation_report(
     return report
 
 
-def _require_passing_selection(
+def _classify_delivery(
     evaluation: Mapping[str, Any],
     revision: int,
     selection_path: Path,
-) -> None:
+) -> str:
     result = evaluation.get("result")
-    if not isinstance(result, Mapping) or result.get("passed") is not True:
+    if not isinstance(result, Mapping) or not isinstance(result.get("passed"), bool):
         raise PipelineIntegrationError(
-            "no revision passed all evaluation gates; refusing to launch the "
-            f"best failing revision {revision}; selection: {selection_path}"
+            f"selected revision {revision} has no valid evaluation result; "
+            f"selection: {selection_path}"
         )
+    checks = evaluation.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise PipelineIntegrationError(
+            f"selected revision {revision} has no evaluation checks; "
+            f"selection: {selection_path}"
+        )
+    check_by_id: dict[str, Mapping[str, Any]] = {}
+    blocking_failures: list[str] = []
+    for index, value in enumerate(checks):
+        if not isinstance(value, Mapping):
+            raise PipelineIntegrationError(
+                f"selected revision {revision} check {index} is invalid; "
+                f"selection: {selection_path}"
+            )
+        check_id = value.get("id")
+        kind = value.get("kind")
+        passed = value.get("passed")
+        if (
+            not isinstance(check_id, str)
+            or not check_id
+            or check_id in check_by_id
+            or kind not in ("hard", "soft")
+            or not isinstance(passed, bool)
+        ):
+            raise PipelineIntegrationError(
+                f"selected revision {revision} check {index} is invalid; "
+                f"selection: {selection_path}"
+            )
+        check_by_id[check_id] = value
+        if kind == "hard" and check_id != VISUAL_CHECK_ID and not passed:
+            blocking_failures.append(check_id)
+
+    missing = sorted(REQUIRED_DELIVERY_CHECKS.difference(check_by_id))
+    wrong_kind = sorted(
+        check_id
+        for check_id in REQUIRED_DELIVERY_CHECKS.intersection(check_by_id)
+        if check_by_id[check_id].get("kind") != "hard"
+    )
+    if missing or wrong_kind:
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if wrong_kind:
+            details.append("not hard " + ", ".join(wrong_kind))
+        raise PipelineIntegrationError(
+            f"selected revision {revision} has invalid delivery checks "
+            f"({'; '.join(details)}); selection: {selection_path}"
+        )
+    if blocking_failures:
+        raise PipelineIntegrationError(
+            f"selected revision {revision} failed delivery-blocking checks: "
+            f"{', '.join(sorted(blocking_failures))}; selection: {selection_path}"
+        )
+    return "passed" if result["passed"] else "best_effort"
+
+
+def _build_delivery_record(
+    evaluation: Mapping[str, Any],
+    revision: int,
+    mode: str,
+    *,
+    correction_stop: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = evaluation["result"]
+    failed_checks = [
+        {
+            "id": check["id"],
+            "message": str(check.get("message", "")),
+        }
+        for check in evaluation["checks"]
+        if check.get("passed") is False
+    ]
+    record: dict[str, Any] = {
+        "schema": DELIVERY_SCHEMA,
+        "run_id": evaluation["run_id"],
+        "world_id": evaluation["world_id"],
+        "world_sha256": evaluation["world_sha256"],
+        "revision": revision,
+        "mode": mode,
+        "evaluation_passed": result["passed"],
+        "evaluation_sha256": contracts.document_sha256(evaluation),
+        "weighted_score": result["weighted_score"],
+        "threshold": result["threshold"],
+        "score_gap": max(0.0, result["threshold"] - result["weighted_score"]),
+        "failed_checks": failed_checks,
+        "remaining_issues": copy.deepcopy(list(evaluation.get("issues", []))),
+        "correction_stop": (
+            copy.deepcopy(dict(correction_stop))
+            if correction_stop is not None
+            else None
+        ),
+    }
+    return record
 
 
 def _load_source_publisher() -> Any:
@@ -1397,6 +1502,7 @@ class PipelineStages:
         prior_world_hashes = _prior_world_hashes(
             project_dir, request_document["request_hash"]
         )
+        correction_stop: dict[str, Any] | None = None
 
         for revision in range(max_iterations + 1):
             iteration_started_utc = _utc_timestamp()
@@ -1476,15 +1582,37 @@ class PipelineStages:
                 runtime.agent(agents.AgentRole.REPAIR),
                 project_root=project_dir,
             )
-            revised, patch = repair_agent.repair(
-                state.request.prompt,
-                world,
-                feedback,
-                screenshots,
-                iteration=revision + 1,
-                reference_image_paths=reference_image_paths,
-                structural_report=structural,
-            )
+            try:
+                revised, patch = repair_agent.repair(
+                    state.request.prompt,
+                    world,
+                    feedback,
+                    screenshots,
+                    iteration=revision + 1,
+                    reference_image_paths=reference_image_paths,
+                    structural_report=structural,
+                )
+            except evaluator.EvaluatorError as exc:
+                _timings(state)["evaluate"] += _elapsed_ms(repair_started)
+                correction_stop = {
+                    "after_revision": revision,
+                    "attempted_revision": revision + 1,
+                    "reason": "repair_rejected",
+                    "message": " ".join(str(exc).split())[:1000],
+                }
+                log(
+                    f"RepairAgent：修订 {revision + 1} 提案未通过校验；"
+                    f"保留已评测修订并停止迭代：{correction_stop['message']}"
+                )
+                runtime.write_trace(
+                    project_dir
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / "agent_trace.json",
+                    run_id=run_id,
+                )
+                break
             _timings(state)["evaluate"] += _elapsed_ms(repair_started)
             patch_path = revision_dir / f"patch_to_rev_{revision + 1}.json"
             patch_path.write_bytes(contracts.canonical_json_bytes(patch) + b"\n")
@@ -1516,6 +1644,12 @@ class PipelineStages:
                 f"best-revision selector returned an unexpected source: {selected_source}"
             )
         selected_revision = int(match.group(1))
+        selected_evaluation = next(
+            report for source, report in evaluations if source == selected_source
+        )
+        delivery_mode = _classify_delivery(
+            selected_evaluation, selected_revision, selection_path
+        )
         selected_world = evaluation_worlds[selected_revision]
         selected_dir = (
             project_dir
@@ -1540,11 +1674,22 @@ class PipelineStages:
             project_dir / "artifacts" / "runs" / run_id / "agent_trace.json",
             run_id=run_id,
         )
-        selected_evaluation = evaluations[selected_revision][1]
-        _require_passing_selection(
-            selected_evaluation, selected_revision, selection_path
+        delivery = _build_delivery_record(
+            selected_evaluation,
+            selected_revision,
+            delivery_mode,
+            correction_stop=correction_stop,
         )
-        log(f"已选择通过全部评价门槛的修订 {selected_revision}：{selection_path}")
+        delivery_path = selection_path.with_name("delivery.json")
+        delivery_path.write_bytes(contracts.canonical_json_bytes(delivery) + b"\n")
+        state.set_result(DELIVERY_RESULT, delivery)
+        if delivery_mode == "passed":
+            log(f"已选择通过全部评价门槛的修订 {selected_revision}：{selection_path}")
+        else:
+            log(
+                "未找到完全通过版本；结构门禁通过，"
+                f"修订 {selected_revision} 作为 best-effort 成品：{delivery_path}"
+            )
 
     def launch(self, state: PipelineState, log: LogSink) -> None:
         project_dir = Path(state.require_result(PROJECT_RESULT)).resolve(strict=True)
@@ -1552,6 +1697,10 @@ class PipelineStages:
         request_document = state.require_result(REQUEST_RESULT)
         run_id = request_document["request_hash"][:12]
         selected_revision = int(state.results.get(SELECTED_REVISION_RESULT, 0))
+        delivery = state.results.get(DELIVERY_RESULT)
+        delivery_mode = (
+            delivery.get("mode") if isinstance(delivery, Mapping) else "unscored"
+        )
         run_environment = _child_process_environment(self.environment)
         run_environment.update(
             {
@@ -1591,7 +1740,10 @@ class PipelineStages:
                 f"log: {play_log}{diagnostic}"
             )
         pid = getattr(process, "pid", "unknown")
-        log(f"Godot 已启动（最佳修订 {selected_revision}，PID {pid}）：{project_dir}")
+        log(
+            f"Godot 已启动（修订 {selected_revision}，交付模式 {delivery_mode}，"
+            f"PID {pid}）：{project_dir}"
+        )
         log(f"运行日志：{play_log}")
 
 

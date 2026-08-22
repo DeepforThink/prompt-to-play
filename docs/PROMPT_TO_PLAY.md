@@ -70,9 +70,11 @@ camera and derives `scene_similarity` and `accepted`. RepairAgent returns a comp
 candidate WorldSpec; the host validates it and deterministically derives only
 allowlisted stable-ID PatchSpec operations. A stale patch hash is rejected. The
 workflow keeps the best revision and permits at most two correction rounds
-after the initial build. Launch requires the selected revision to pass all
-gates; when every revision fails, evidence and selection are retained and the
-pipeline stops before launch.
+after the initial build. A fully passing revision is preferred. When none
+passes, the highest-ranked revision that passes every non-visual hard check is
+delivered as `best_effort`; its failed visual checks, score gap, issues, and
+correction-stop reason remain explicit in `delivery.json`. A structural hard
+failure still stops the pipeline before launch.
 
 ## Generality boundary
 
@@ -124,11 +126,12 @@ Each run retains its request, the Planner baseline, every refinement round and
 task outcome, every WorldSpec revision, asset catalog and rich
 asset manifest, build manifest, structural report, visual feedback, scored
 evaluation, patches, screenshots, best-revision selection, elapsed time, and
-per-agent model/Token trace. A good-looking screenshot cannot override a failed
-structural hard gate. Original reference images are attached before generated
-screenshots for both visual evaluation and repair, with explicit image counts
-so the evaluator can compare against the actual references rather than path
-names alone.
+per-agent model/Token trace. `delivery.json` records whether the selected
+revision fully passed or is a structurally valid best-effort result. A
+good-looking screenshot cannot override a failed structural hard gate.
+Original reference images are attached before generated screenshots for both
+visual evaluation and repair, with explicit image counts so the evaluator can
+compare against the actual references rather than path names alone.
 
 Operational `PTP_RUN_ID` and `PTP_REVISION` values only select immutable
 evidence directories; revision is restricted to the initial build plus two
