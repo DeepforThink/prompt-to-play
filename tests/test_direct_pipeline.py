@@ -326,7 +326,18 @@ class DirectRuntimeIsolationTests(unittest.TestCase):
             discovered = direct_host.discover_toolchain(
                 layout.source_repo, environment={"PATH": ""}, which=lambda _name: None
             )
-            self.assertEqual(discovered, layout.toolchain)
+            self.assertTrue(
+                discovered.dotnet_exe.samefile(layout.toolchain.dotnet_exe)
+            )
+            self.assertTrue(
+                discovered.godot_exe.samefile(layout.toolchain.godot_exe)
+            )
+            self.assertTrue(
+                discovered.godot_nupkgs.samefile(layout.toolchain.godot_nupkgs)
+            )
+            self.assertTrue(
+                discovered.visible_exe.samefile(layout.toolchain.visible_exe)
+            )
 
 
 class DirectPipelinePlanningAndPublishingTests(unittest.TestCase):

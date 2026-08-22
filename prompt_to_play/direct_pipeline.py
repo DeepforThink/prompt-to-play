@@ -878,6 +878,7 @@ class DirectPipelineStages:
         captures = manifest.get("captures")
         if manifest.get("status") != "pass" or not isinstance(captures, list):
             return manifest, [], [], diagnostic
+        project_root = project_dir.resolve(strict=True)
         absolute_paths: list[Path] = []
         relative_paths: list[str] = []
         for index, capture in enumerate(captures):
@@ -897,9 +898,9 @@ class DirectPipelineStages:
                 raise PipelineIntegrationError(
                     "direct capture path must stay in its revision capture directory"
                 )
-            image = project_dir.joinpath(*relative.parts).resolve(strict=True)
+            image = project_root.joinpath(*relative.parts).resolve(strict=True)
             try:
-                image.relative_to(project_dir)
+                image.relative_to(project_root)
             except ValueError as exc:
                 raise PipelineIntegrationError(
                     "capture path escapes the project"
@@ -923,12 +924,13 @@ class DirectPipelineStages:
         self, state: PipelineState, project_dir: Path
     ) -> list[Path]:
         result: list[Path] = []
+        project_root = project_dir.resolve(strict=True)
         bindings: Sequence[ReferenceBinding] = state.require_result(REFERENCES_RESULT)
         for binding in bindings:
-            path = project_dir.joinpath(*PurePosixPath(binding.project_path).parts)
+            path = project_root.joinpath(*PurePosixPath(binding.project_path).parts)
             resolved = path.resolve(strict=True)
             try:
-                resolved.relative_to(project_dir)
+                resolved.relative_to(project_root)
             except ValueError as exc:
                 raise PipelineIntegrationError(
                     f"published reference escapes project: {binding.project_path}"

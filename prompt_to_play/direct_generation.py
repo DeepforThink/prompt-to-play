@@ -633,7 +633,9 @@ def _scan_generated_files(root: Path) -> dict[str, tuple[str, bytes]]:
     generated = root / "generated"
     if not generated.exists():
         return {}
-    if _is_link_or_junction(generated) or not generated.is_dir():
+    if _is_link_or_junction(generated):
+        _fail("generated", "must not be a symbolic link or junction")
+    if not generated.is_dir():
         _fail("generated", "must be a real directory")
     result: dict[str, tuple[str, bytes]] = {}
     total_bytes = 0
