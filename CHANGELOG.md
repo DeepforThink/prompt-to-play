@@ -7,6 +7,12 @@
 - The built-in renderer uses terraced contour terrain and high-contrast marked tracks when generated code is unavailable. Runtime random decoration is opt-in, and orbit capture poses adapt to world bounds and elevation.
 - Verified against `topographic_ridge_circuit`: 160 Python tests, Godot .NET build with zero warnings/errors, structural checks, and three rendered evaluation views.
 
+**2026-08-22 - Prompt-derived world presentation**
+- Replaced the single large CodeObjectAgent request with independent `regions`, `roads`, and `objects` calls. Partial model output remains usable and each segment is traced and revision-scoped.
+- Racing worlds now use a visible third-person vehicle with acceleration, braking, steering, chase camera, start-line extension, topology-based region connectors, and a non-blocking finish gate.
+- Topographic worlds now use a paper map backdrop, layered contour terrain, hidden boundary layers for oblique/player views, and orbit framing that avoids the highest interior landform.
+- Verified with 163 Python tests, a Godot .NET build with zero warnings/errors, and four real three-view capture passes on the generated circuit.
+
 **2026-07-02 — Docs-only runtime**
 - Replaced the multi-stage skill pipeline with a thin runtime: a single engine-agnostic manifest (`prompts/runtime.md`), a one-page per-engine guide, and the cross-engine `asset-gen` skill. The model plans, scaffolds, and decomposes the work itself.
 - One runtime manifest covers delivery. The agent reads how the task is framed in-run: an open-ended direction gets the live game early and checkpoints at taste/scope/cost decisions; a finished brief runs on reasonable calls and closes with a 15–20s proof recording, watched back before done. Run/show/capture mechanics live in the engine guides and serve both paths.

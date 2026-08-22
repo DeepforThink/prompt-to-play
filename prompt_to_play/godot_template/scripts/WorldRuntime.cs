@@ -356,6 +356,7 @@ public partial class WorldRuntime : Node3D
     private void BuildWorld()
     {
         BuildEnvironment();
+        BuildMapBackdrop();
         foreach (RegionSpec region in _spec.Regions.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             BuildRegion(region);
@@ -364,6 +365,7 @@ public partial class WorldRuntime : Node3D
         {
             BuildRoad(road);
         }
+        BuildRoadConnectors();
         foreach (BuildingSpec building in _spec.Buildings.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             BuildPrefabEntity(
@@ -392,6 +394,40 @@ public partial class WorldRuntime : Node3D
         BuildExit();
         BuildHud();
         UpdateHud();
+    }
+
+    private void BuildMapBackdrop()
+    {
+        if (!IsTopographicWorld())
+        {
+            return;
+        }
+
+        float minX = _spec.Regions.Min(region => region.Center[0] - region.Size[0] * 0.5f);
+        float maxX = _spec.Regions.Max(region => region.Center[0] + region.Size[0] * 0.5f);
+        float minZ = _spec.Regions.Min(region => region.Center[2] - region.Size[2] * 0.5f);
+        float maxZ = _spec.Regions.Max(region => region.Center[2] + region.Size[2] * 0.5f);
+        float minElevation = _spec.Regions.Min(region => region.Elevation);
+        string stableId = RuntimeId("map_backdrop");
+        Vector3 center = new((minX + maxX) * 0.5f, minElevation - 4.5f, (minZ + maxZ) * 0.5f);
+        var backdrop = new Node3D
+        {
+            Name = "MapBackdrop",
+            Position = center,
+        };
+        _generated.AddChild(backdrop);
+        PrimitiveFactory.AddBoxVisual(
+            backdrop,
+            "Paper",
+            Vector3.Zero,
+            new Vector3(maxX - minX + 16.0f, 0.22f, maxZ - minZ + 16.0f),
+            PrimitiveFactory.Material(_groundColor.Lerp(_skyColor, 0.42f), roughness: 1.0f));
+        RegisterStable(
+            backdrop,
+            stableId,
+            "backdrop",
+            StableSeed.Derive(_spec.Seed, stableId),
+            center);
     }
 
     private void BuildEnvironment()
@@ -484,10 +520,7 @@ public partial class WorldRuntime : Node3D
         Vector3 size,
         RandomNumberGenerator rng)
     {
-        string semantic = $"{region.Kind} {_spec.Style.Theme} {_spec.Brief.Text}".ToLowerInvariant();
-        bool topographic = ContainsAny(
-            semantic,
-            "topographic", "contour", "cartograph", "heightmap", "地形图", "等高线");
+        bool topographic = IsTopographicWorld();
         if (!topographic)
         {
             Color surfaceColor = _groundColor.Lerp(
@@ -504,25 +537,49 @@ public partial class WorldRuntime : Node3D
 
         bool border = ContainsAny(region.Kind.ToLowerInvariant(), "border", "wall", "边界", "山墙");
         bool peak = ContainsAny(region.Kind.ToLowerInvariant(), "peak", "ridge", "mountain", "峰", "山脊");
-        int layers = border ? 7 : peak ? 6 : 4;
-        float topScale = border ? 0.78f : peak ? 0.68f : 0.88f;
+        int layers = border ? 6 : peak ? 7 : 5;
+        float topScale = border ? 0.90f : peak ? 0.62f : 0.84f;
+        float minElevation = _spec.Regions.Min(item => item.Elevation);
+        float maxElevation = _spec.Regions.Max(item => item.Elevation);
+        float elevationRange = Mathf.Max(1.0f, maxElevation - minElevation);
+        float elevation = Mathf.Clamp((region.Elevation - minElevation) / elevationRange, 0.0f, 1.0f);
+        Color lowland = _accentColor.Lerp(_groundColor, 0.42f);
+        Color highland = _groundColor.Lerp(Colors.White, 0.32f);
+        Color terrainColor = lowland.Lerp(highland, elevation);
+        if (border)
+        {
+            terrainColor = _accentColor.Darkened(0.24f);
+        }
         for (int layer = 0; layer < layers; layer++)
         {
             float progress = layers == 1 ? 1.0f : layer / (float)(layers - 1);
             float footprint = Mathf.Lerp(1.0f, topScale, progress);
-            float height = border ? 0.42f : 0.30f;
+            float height = border ? 0.24f : 0.32f;
             float y = -(layers - layer - 1) * height - height * 0.5f;
-            Color color = _groundColor.Lerp(
-                _accentColor,
-                (border ? 0.26f : 0.12f) + progress * 0.16f);
-            var terrace = PrimitiveFactory.AddCylinderVisual(
-                root,
-                $"Contour{layer:D2}",
-                new Vector3(0.0f, y, 0.0f),
-                0.5f,
-                height,
-                PrimitiveFactory.Material(color, roughness: 0.92f));
-            terrace.Scale = new Vector3(size.X * footprint, 1.0f, size.Z * footprint);
+            Color color = terrainColor.Lightened(progress * 0.10f);
+            Material terraceMaterial = PrimitiveFactory.Material(color, roughness: 0.92f);
+            MeshInstance3D terrace;
+            if (border)
+            {
+                terrace = PrimitiveFactory.AddBoxVisual(
+                    root,
+                    $"Contour{layer:D2}",
+                    new Vector3(0.0f, y, 0.0f),
+                    new Vector3(size.X * footprint, height, size.Z * footprint),
+                    terraceMaterial);
+                terrace.Layers = 1u << 1;
+            }
+            else
+            {
+                terrace = PrimitiveFactory.AddCylinderVisual(
+                    root,
+                    $"Contour{layer:D2}",
+                    new Vector3(0.0f, y, 0.0f),
+                    0.5f,
+                    height,
+                    terraceMaterial);
+                terrace.Scale = new Vector3(size.X * footprint, 1.0f, size.Z * footprint);
+            }
         }
     }
 
@@ -644,17 +701,7 @@ public partial class WorldRuntime : Node3D
         _generated.AddChild(root);
         RegisterStable(root, road.Id, "road", roadSeed, Vector3.Zero);
 
-        RegionSpec fromRegion = _spec.Regions.First(region => region.Id == road.From);
-        RegionSpec toRegion = _spec.Regions.First(region => region.Id == road.To);
-        var pathPoints = new List<Vector3>
-        {
-            new(fromRegion.Center[0], fromRegion.Elevation, fromRegion.Center[2]),
-        };
-        pathPoints.AddRange(road.Waypoints.Select(ToVector3));
-        pathPoints.Add(new Vector3(
-            toRegion.Center[0],
-            toRegion.Elevation,
-            toRegion.Center[2]));
+        var pathPoints = road.Waypoints.Select(ToVector3).ToList();
         Vector3[] path = pathPoints
             .Where((point, index) => index == 0 || point.DistanceSquaredTo(pathPoints[index - 1]) > 0.01f)
             .ToArray();
@@ -715,6 +762,7 @@ public partial class WorldRuntime : Node3D
         bool needsRails = ContainsAny(
             road.Kind.ToLowerInvariant(),
             "bridge", "elevated", "桥", "高架");
+        float visualWidth = racingTrack ? road.Width : road.Width * 0.38f;
         var trackMaterial = PrimitiveFactory.Material(
             racingTrack ? _primaryColor : _groundColor.Lerp(_accentColor, 0.45f),
             metallic: 0.08f,
@@ -723,6 +771,16 @@ public partial class WorldRuntime : Node3D
             racingTrack ? _emissiveColor : _accentColor,
             roughness: 0.72f);
         var railMaterial = PrimitiveFactory.Material(_accentColor, metallic: 0.35f);
+        for (int index = 0; index < path.Length; index++)
+        {
+            PrimitiveFactory.AddCylinderVisual(
+                root,
+                $"Junction{index:D2}",
+                path[index] + Vector3.Up * 0.05f,
+                visualWidth * 0.46f,
+                0.10f,
+                trackMaterial);
+        }
         for (int index = 0; index < segments.Count; index++)
         {
             (StaticBody3D segment, float length) = segments[index];
@@ -730,7 +788,7 @@ public partial class WorldRuntime : Node3D
                 segment,
                 "Track",
                 new Vector3(0.0f, 0.30f, 0.0f),
-                new Vector3(road.Width, 0.10f, length),
+                new Vector3(visualWidth, 0.10f, length),
                 trackMaterial);
             if (racingTrack)
             {
@@ -757,6 +815,125 @@ public partial class WorldRuntime : Node3D
                     railMaterial);
             }
         }
+    }
+
+    private void BuildRoadConnectors()
+    {
+        foreach (RegionSpec region in _spec.Regions.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            List<RoadSpec> racingRoads = _spec.Roads
+                .Where(road => (road.From == region.Id || road.To == region.Id) && IsRacingRoad(road))
+                .OrderBy(road => road.Id, StringComparer.Ordinal)
+                .ToList();
+            if (racingRoads.Count != 2)
+            {
+                continue;
+            }
+
+            Vector3 first = RoadEndpointAtRegion(racingRoads[0], region.Id);
+            Vector3 second = RoadEndpointAtRegion(racingRoads[1], region.Id);
+            var points = new List<Vector3> { first };
+            if (region.Id == _spec.Interactions.PlayerSpawn.Region)
+            {
+                points.Add(ToVector3(_spec.Interactions.PlayerSpawn.Position));
+            }
+            points.Add(second);
+            float width = Mathf.Min(racingRoads[0].Width, racingRoads[1].Width);
+            BuildConnectorPath(region.Id, points, width);
+        }
+
+        if (IsDrivingWorld())
+        {
+            Vector3 spawn = ToVector3(_spec.Interactions.PlayerSpawn.Position);
+            Vector3 vehicleSpawn = ResolvePlayerSpawn(drivingMode: true) - Vector3.Up * 0.65f;
+            BuildConnectorPath("start_extension", new[] { vehicleSpawn, spawn }, 5.0f);
+        }
+    }
+
+    private void BuildConnectorPath(
+        string ownerId,
+        IReadOnlyList<Vector3> points,
+        float width)
+    {
+        string rootId = RuntimeId($"road_connector.{ownerId}");
+        var root = new Node3D { Name = SafeNodeName(rootId) };
+        _generated.AddChild(root);
+        RegisterStable(
+            root,
+            rootId,
+            "road_connector",
+            StableSeed.Derive(_spec.Seed, rootId),
+            Vector3.Zero);
+        var trackMaterial = PrimitiveFactory.Material(
+            _primaryColor,
+            metallic: 0.08f,
+            roughness: 0.78f);
+        var markingMaterial = PrimitiveFactory.Material(_emissiveColor, roughness: 0.72f);
+        for (int index = 0; index < points.Count; index++)
+        {
+            PrimitiveFactory.AddCylinderVisual(
+                root,
+                $"Junction{index:D2}",
+                points[index] + Vector3.Up * 0.05f,
+                width * 0.46f,
+                0.10f,
+                trackMaterial);
+        }
+        for (int index = 0; index < points.Count - 1; index++)
+        {
+            Vector3 from = points[index];
+            Vector3 to = points[index + 1];
+            Vector3 delta = to - from;
+            float length = delta.Length();
+            if (length < 0.05f)
+            {
+                continue;
+            }
+            Vector3 center = (from + to) * 0.5f - Vector3.Up * 0.25f;
+            string segmentId = RuntimeId($"road_connector.{ownerId}.segment.{index:D2}");
+            StaticBody3D segment = PrimitiveFactory.AddBoxCollision(
+                root,
+                $"Segment{index:D2}",
+                center,
+                new Vector3(width, 0.5f, length),
+                addToWalkableGroup: true);
+            Vector3 up = Mathf.Abs(delta.Normalized().Dot(Vector3.Up)) > 0.98f
+                ? Vector3.Forward
+                : Vector3.Up;
+            segment.LookAt(to - Vector3.Up * 0.25f, up);
+            RegisterStable(
+                segment,
+                segmentId,
+                "road_segment",
+                StableSeed.Derive(_spec.Seed, segmentId),
+                center);
+            PrimitiveFactory.AddBoxVisual(
+                segment,
+                "Track",
+                new Vector3(0.0f, 0.30f, 0.0f),
+                new Vector3(width, 0.10f, length),
+                trackMaterial);
+            PrimitiveFactory.AddBoxVisual(
+                segment,
+                "CenterMarking",
+                new Vector3(0.0f, 0.37f, 0.0f),
+                new Vector3(Mathf.Max(0.12f, width * 0.045f), 0.035f, length * 0.82f),
+                markingMaterial);
+        }
+    }
+
+    private static Vector3 RoadEndpointAtRegion(RoadSpec road, string regionId)
+    {
+        float[] values = road.From == regionId
+            ? road.Waypoints[0]
+            : road.Waypoints[^1];
+        return ToVector3(values);
+    }
+
+    private static bool IsRacingRoad(RoadSpec road)
+    {
+        string kind = road.Kind.ToLowerInvariant();
+        return ContainsAny(kind, "race", "track", "circuit", "赛道", "竞速");
     }
 
     private void BuildPrefabEntity(
@@ -818,6 +995,11 @@ public partial class WorldRuntime : Node3D
         _primitiveFallbackIds.Add(stableId);
 
         string token = prefab.ToLowerInvariant();
+        if (IsTopographicWorld() && token.Contains("contour", StringComparison.Ordinal))
+        {
+            root.SetMeta("visual_resolution", "region_contours");
+            return;
+        }
         if (token.Contains("tree") || token.Contains("forest"))
         {
             BuildTreePrimitive(root, scale, seed);
@@ -1039,6 +1221,7 @@ public partial class WorldRuntime : Node3D
                 Fov = cameraSpec.FovDegrees,
                 Current = false,
             };
+            camera.SetCullMaskValue(2, cameraSpec.Kind == "fixed");
             _generated.AddChild(camera);
             camera.LookAt(target, Vector3.Up);
             camera.SetMeta("camera_kind", cameraSpec.Kind);
@@ -1072,33 +1255,48 @@ public partial class WorldRuntime : Node3D
 
     private void BuildPlayer()
     {
+        bool drivingMode = IsDrivingWorld();
+        Vector3 playerPosition = ResolvePlayerSpawn(drivingMode);
         var player = new PlayerController
         {
             Name = "Player",
-            Position = ToVector3(_spec.Interactions.PlayerSpawn.Position),
+            Position = playerPosition,
             CollisionLayer = 1,
             CollisionMask = 1,
         };
+        player.Configure(drivingMode);
         var collision = new CollisionShape3D
         {
             Name = "Collision",
-            Shape = new CapsuleShape3D { Radius = 0.45f, Height = 1.8f },
+            Position = drivingMode ? new Vector3(0.0f, 0.55f, 0.0f) : Vector3.Zero,
+            Shape = drivingMode
+                ? new BoxShape3D { Size = new Vector3(1.8f, 0.9f, 3.2f) }
+                : new CapsuleShape3D { Radius = 0.45f, Height = 1.8f },
         };
         var head = new Node3D
         {
             Name = "Head",
-            Position = new Vector3(0.0f, 0.62f, 0.0f),
+            Position = drivingMode
+                ? new Vector3(0.0f, 1.15f, 0.0f)
+                : new Vector3(0.0f, 0.62f, 0.0f),
         };
         var camera = new Camera3D
         {
-            Name = "FpsCamera",
+            Name = drivingMode ? "ChaseCamera" : "FpsCamera",
+            Position = drivingMode ? new Vector3(0.0f, 2.6f, 7.2f) : Vector3.Zero,
+            RotationDegrees = drivingMode ? new Vector3(-13.0f, 0.0f, 0.0f) : Vector3.Zero,
             Current = true,
-            Fov = 75.0f,
+            Fov = drivingMode ? 68.0f : 75.0f,
             Near = 0.05f,
         };
         head.AddChild(camera);
         player.AddChild(collision);
         player.AddChild(head);
+        if (drivingMode)
+        {
+            BuildVehicleVisual(player);
+            OrientVehicleTowardTrack(player);
+        }
         _generated.AddChild(player);
         string stableId = RuntimeId("player");
         RegisterStable(
@@ -1107,6 +1305,106 @@ public partial class WorldRuntime : Node3D
             "player",
             StableSeed.Derive(_spec.Seed, stableId),
             player.Position);
+    }
+
+    private void BuildVehicleVisual(Node3D player)
+    {
+        var bodyMaterial = PrimitiveFactory.Material(_primaryColor, metallic: 0.28f, roughness: 0.48f);
+        var cabinMaterial = PrimitiveFactory.Material(
+            _skyColor.Darkened(0.46f),
+            metallic: 0.18f,
+            roughness: 0.30f);
+        var trimMaterial = PrimitiveFactory.Material(_emissiveColor, metallic: 0.12f, roughness: 0.55f);
+        var tireMaterial = PrimitiveFactory.Material(new Color(0.055f, 0.06f, 0.065f), roughness: 0.92f);
+        PrimitiveFactory.AddBoxVisual(
+            player,
+            "VehicleBody",
+            new Vector3(0.0f, 0.55f, 0.0f),
+            new Vector3(1.85f, 0.55f, 3.25f),
+            bodyMaterial);
+        PrimitiveFactory.AddBoxVisual(
+            player,
+            "VehicleCabin",
+            new Vector3(0.0f, 1.02f, 0.22f),
+            new Vector3(1.40f, 0.52f, 1.55f),
+            cabinMaterial);
+        PrimitiveFactory.AddBoxVisual(
+            player,
+            "VehicleStripe",
+            new Vector3(0.0f, 0.86f, -1.20f),
+            new Vector3(0.42f, 0.08f, 0.88f),
+            trimMaterial);
+        Vector3[] wheelPositions =
+        {
+            new(-0.96f, 0.42f, -1.08f),
+            new(0.96f, 0.42f, -1.08f),
+            new(-0.96f, 0.42f, 1.08f),
+            new(0.96f, 0.42f, 1.08f),
+        };
+        for (int index = 0; index < wheelPositions.Length; index++)
+        {
+            MeshInstance3D wheel = PrimitiveFactory.AddCylinderVisual(
+                player,
+                $"Wheel{index + 1}",
+                wheelPositions[index],
+                0.38f,
+                0.32f,
+                tireMaterial);
+            wheel.RotationDegrees = new Vector3(0.0f, 0.0f, 90.0f);
+        }
+    }
+
+    private Vector3 ResolvePlayerSpawn(bool drivingMode)
+    {
+        Vector3 spawn = ToVector3(_spec.Interactions.PlayerSpawn.Position);
+        if (!drivingMode)
+        {
+            return spawn;
+        }
+
+        RoadSpec? road = _spec.Roads.FirstOrDefault(item =>
+            item.From == _spec.Interactions.PlayerSpawn.Region ||
+            item.To == _spec.Interactions.PlayerSpawn.Region);
+        if (road is null || road.Waypoints.Count == 0)
+        {
+            return spawn + new Vector3(0.0f, 0.65f, 4.0f);
+        }
+
+        Vector3 nearest = road.Waypoints
+            .Select(ToVector3)
+            .OrderBy(point => point.DistanceSquaredTo(spawn))
+            .First();
+        Vector3 direction = nearest - spawn;
+        direction.Y = 0.0f;
+        if (direction.LengthSquared() < 0.01f)
+        {
+            direction = Vector3.Forward;
+        }
+        return spawn - direction.Normalized() * 4.5f + Vector3.Up * 0.65f;
+    }
+
+    private void OrientVehicleTowardTrack(Node3D player)
+    {
+        RoadSpec? road = _spec.Roads.FirstOrDefault(item =>
+            item.From == _spec.Interactions.PlayerSpawn.Region ||
+            item.To == _spec.Interactions.PlayerSpawn.Region);
+        if (road is null || road.Waypoints.Count == 0)
+        {
+            return;
+        }
+        Vector3 target = road.Waypoints
+            .Select(ToVector3)
+            .OrderBy(point => point.DistanceSquaredTo(player.Position))
+            .First();
+        target.Y = player.Position.Y;
+        if (target.DistanceSquaredTo(player.Position) > 0.01f)
+        {
+            Vector3 direction = (target - player.Position).Normalized();
+            player.Rotation = new Vector3(
+                0.0f,
+                Mathf.Atan2(-direction.X, -direction.Z),
+                0.0f);
+        }
     }
 
     private void BuildInteractables()
@@ -1127,6 +1425,7 @@ public partial class WorldRuntime : Node3D
                 CollisionLayer = 2,
                 CollisionMask = 1,
             };
+            OrientCheckpointTowardRoad(interactable, spec);
             bool codeGenerated = GeneratedCodeObjects.TryBuild(
                 spec.Id,
                 "interactable",
@@ -1154,12 +1453,7 @@ public partial class WorldRuntime : Node3D
                 interactable.SetMeta("asset_resolution", "primitive_fallback");
                 interactable.SetMeta("asset_resolution_error", assetFailure);
                 _primitiveFallbackIds.Add(spec.Id);
-                PrimitiveFactory.AddSphereVisual(
-                    interactable,
-                    "Visual",
-                    Vector3.Zero,
-                    0.65f,
-                    material);
+                BuildInteractableFallback(interactable, spec, material);
             }
             if (!string.IsNullOrEmpty(codeFailure))
             {
@@ -1189,6 +1483,100 @@ public partial class WorldRuntime : Node3D
         }
     }
 
+    private void BuildInteractableFallback(
+        Node3D root,
+        InteractableSpec spec,
+        Material material)
+    {
+        string semantic = $"{spec.Prefab} {spec.Label}".ToLowerInvariant();
+        bool checkpoint = ContainsAny(
+            semantic,
+            "checkpoint", "race", "gate", "finish", "检查点", "终点", "赛道");
+        if (!checkpoint)
+        {
+            PrimitiveFactory.AddSphereVisual(root, "Visual", Vector3.Zero, 0.65f, material);
+            return;
+        }
+
+        bool sharesExit = ToVector3(_spec.Interactions.Exit.Position)
+            .DistanceSquaredTo(ToVector3(spec.Position)) < 1.0f;
+        var markerMaterial = PrimitiveFactory.Material(
+            _emissiveColor,
+            roughness: 0.62f,
+            emission: _emissiveColor);
+        if (sharesExit)
+        {
+            for (int index = 0; index < 6; index++)
+            {
+                PrimitiveFactory.AddBoxVisual(
+                    root,
+                    $"StartMark{index + 1}",
+                    new Vector3(-2.5f + index, 0.08f, 0.0f),
+                    new Vector3(0.78f, 0.10f, 0.65f),
+                    index % 2 == 0 ? markerMaterial : material);
+            }
+            return;
+        }
+
+        PrimitiveFactory.AddBoxVisual(
+            root,
+            "PostLeft",
+            new Vector3(-2.25f, 1.35f, 0.0f),
+            new Vector3(0.34f, 2.7f, 0.34f),
+            material);
+        PrimitiveFactory.AddBoxVisual(
+            root,
+            "PostRight",
+            new Vector3(2.25f, 1.35f, 0.0f),
+            new Vector3(0.34f, 2.7f, 0.34f),
+            material);
+        PrimitiveFactory.AddBoxVisual(
+            root,
+            "CheckpointTop",
+            new Vector3(0.0f, 2.65f, 0.0f),
+            new Vector3(4.85f, 0.34f, 0.34f),
+            markerMaterial);
+    }
+
+    private void OrientCheckpointTowardRoad(Node3D root, InteractableSpec spec)
+    {
+        string semantic = $"{spec.Prefab} {spec.Label}".ToLowerInvariant();
+        if (!ContainsAny(semantic, "checkpoint", "race", "gate", "检查点", "赛道"))
+        {
+            return;
+        }
+
+        Vector3 origin = ToVector3(spec.Position);
+        (Vector3 From, Vector3 To, float Distance)? nearest = null;
+        foreach (RoadSpec road in _spec.Roads)
+        {
+            var points = road.Waypoints.Select(ToVector3).ToList();
+            for (int index = 0; index < points.Count - 1; index++)
+            {
+                Vector3 midpoint = (points[index] + points[index + 1]) * 0.5f;
+                float distance = midpoint.DistanceSquaredTo(origin);
+                if (nearest is null || distance < nearest.Value.Distance)
+                {
+                    nearest = (points[index], points[index + 1], distance);
+                }
+            }
+        }
+        if (nearest is null)
+        {
+            return;
+        }
+        Vector3 direction = nearest.Value.To - nearest.Value.From;
+        direction.Y = 0.0f;
+        if (direction.LengthSquared() > 0.01f)
+        {
+            direction = direction.Normalized();
+            root.Rotation = new Vector3(
+                0.0f,
+                Mathf.Atan2(-direction.X, -direction.Z),
+                0.0f);
+        }
+    }
+
     private void BuildExit()
     {
         ExitSpec spec = _spec.Interactions.Exit;
@@ -1210,13 +1598,27 @@ public partial class WorldRuntime : Node3D
             Position = new Vector3(0.0f, 1.5f, 0.0f),
             Shape = new BoxShape3D { Size = new Vector3(5.0f, 3.5f, 4.0f) },
         });
-        StaticBody3D barrier = PrimitiveFactory.AddBoxBody(
-            gate,
-            "Barrier",
-            new Vector3(0.0f, 1.6f, 0.0f),
-            new Vector3(3.6f, 3.2f, 0.35f),
-            gateMaterial);
-        CollisionShape3D barrierCollision = barrier.GetNode<CollisionShape3D>("Collision");
+        CollisionShape3D barrierCollision;
+        if (IsDrivingWorld())
+        {
+            barrierCollision = new CollisionShape3D
+            {
+                Name = "BarrierCollision",
+                Disabled = true,
+                Shape = new BoxShape3D { Size = new Vector3(3.6f, 3.2f, 0.35f) },
+            };
+            gate.AddChild(barrierCollision);
+        }
+        else
+        {
+            StaticBody3D barrier = PrimitiveFactory.AddBoxBody(
+                gate,
+                "Barrier",
+                new Vector3(0.0f, 1.6f, 0.0f),
+                new Vector3(3.6f, 3.2f, 0.35f),
+                gateMaterial);
+            barrierCollision = barrier.GetNode<CollisionShape3D>("Collision");
+        }
         var frameMaterial = PrimitiveFactory.Material(_primaryColor, metallic: 0.55f);
         PrimitiveFactory.AddBoxVisual(
             gate,
@@ -1236,6 +1638,12 @@ public partial class WorldRuntime : Node3D
             new Vector3(0.0f, 3.55f, 0.0f),
             new Vector3(4.7f, 0.5f, 0.8f),
             frameMaterial);
+        PrimitiveFactory.AddBoxVisual(
+            gate,
+            "StatusLight",
+            new Vector3(0.0f, 3.55f, -0.46f),
+            new Vector3(1.25f, 0.18f, 0.12f),
+            gateMaterial);
         gate.Configure(spec.Requires, barrierCollision, gateMaterial);
         gate.Completed += OnExitCompleted;
         _generated.AddChild(gate);
@@ -1312,9 +1720,12 @@ public partial class WorldRuntime : Node3D
         string interaction = _interactionPrompts.Count == 0
             ? string.Empty
             : $"\n{_interactionPrompts.First().Value}";
+        string controls = IsDrivingWorld()
+            ? "W/S 加速制动 · A/D 转向 · E 交互 · Esc 释放鼠标"
+            : "WASD 移动 · 空格跳跃 · E 交互 · Esc 释放鼠标";
         _hud.Text =
             $"{_spec.WorldId} · {_spec.Style.Theme}\n" +
-            "WASD 移动 · 空格跳跃 · E 交互 · Esc 释放鼠标\n" +
+            $"{controls}\n" +
             $"{objectives}\n{gate}{interaction}" +
             (string.IsNullOrEmpty(_lastMessage) ? string.Empty : $"\n{_lastMessage}");
     }
@@ -1438,19 +1849,27 @@ public partial class WorldRuntime : Node3D
         float maxZ = _spec.Regions.Max(region => region.Center[2] + region.Size[2] * 0.5f);
         float span = Mathf.Max(maxX - minX, maxZ - minZ);
         float maxElevation = _spec.Regions.Max(region => region.Elevation);
-        Vector3 horizontal = new(position.X - target.X, 0.0f, position.Z - target.Z);
-        float minimumDistance = Mathf.Max(18.0f, span * 0.30f);
-        if (horizontal.Length() < minimumDistance)
+        float minimumDistance = Mathf.Max(24.0f, span * 0.58f);
+        RegionSpec? highestInterior = _spec.Regions
+            .Where(region => !ContainsAny(
+                region.Kind.ToLowerInvariant(),
+                "border", "wall", "边界", "山墙"))
+            .OrderByDescending(region => region.Elevation)
+            .FirstOrDefault();
+        Vector3 horizontal = highestInterior is null
+            ? new Vector3(position.X - target.X, 0.0f, position.Z - target.Z)
+            : new Vector3(
+                target.X - highestInterior.Center[0],
+                0.0f,
+                target.Z - highestInterior.Center[2]);
+        if (horizontal.LengthSquared() < 0.01f)
         {
-            if (horizontal.LengthSquared() < 0.01f)
-            {
-                horizontal = new Vector3(-1.0f, 0.0f, -1.0f);
-            }
-            horizontal = horizontal.Normalized() * minimumDistance;
-            position.X = target.X + horizontal.X;
-            position.Z = target.Z + horizontal.Z;
+            horizontal = new Vector3(-1.0f, 0.0f, -1.0f);
         }
-        position.Y = Mathf.Max(position.Y, maxElevation + Mathf.Max(18.0f, span * 0.42f));
+        horizontal = horizontal.Normalized() * minimumDistance;
+        position.X = target.X + horizontal.X;
+        position.Z = target.Z + horizontal.Z;
+        position.Y = Mathf.Max(position.Y, maxElevation + Mathf.Max(22.0f, span * 0.50f));
         return (position, target);
     }
 
@@ -1610,6 +2029,25 @@ public partial class WorldRuntime : Node3D
     private string RuntimeId(string suffix)
     {
         return $"runtime.{_spec.WorldId}.{suffix}";
+    }
+
+    private bool IsTopographicWorld()
+    {
+        string semantic = $"{_spec.Style.Theme} {_spec.Brief.Text}".ToLowerInvariant();
+        return ContainsAny(
+            semantic,
+            "topographic", "contour", "cartograph", "heightmap", "ordnance survey",
+            "地形图", "等高线", "高程图", "地图美学");
+    }
+
+    private bool IsDrivingWorld()
+    {
+        string roadKinds = string.Join(' ', _spec.Roads.Select(road => road.Kind));
+        string semantic = $"{_spec.Style.Theme} {_spec.Brief.Text} {roadKinds}".ToLowerInvariant();
+        return ContainsAny(
+            semantic,
+            "racing", "race track", "circuit", "driving", "vehicle", "car physics",
+            "kart", "赛车", "竞速", "赛道", "驾驶", "车辆", "汽车");
     }
 
     private static bool ContainsAny(string value, params string[] tokens)

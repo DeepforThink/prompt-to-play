@@ -5,6 +5,12 @@ namespace PromptToPlay;
 public partial class PlayerController : CharacterBody3D
 {
     private const float MoveSpeed = 8.0f;
+    private const float DriveForwardSpeed = 22.0f;
+    private const float DriveReverseSpeed = 8.0f;
+    private const float DriveAcceleration = 18.0f;
+    private const float DriveBraking = 28.0f;
+    private const float DriveCoastDeceleration = 7.0f;
+    private const float DriveTurnRate = 1.65f;
     private const float GroundAcceleration = 28.0f;
     private const float AirAcceleration = 8.0f;
     private const float JumpVelocity = 7.5f;
@@ -12,6 +18,13 @@ public partial class PlayerController : CharacterBody3D
 
     private Node3D _head = null!;
     private float _gravity;
+    private float _driveSpeed;
+    private bool _drivingMode;
+
+    public void Configure(bool drivingMode)
+    {
+        _drivingMode = drivingMode;
+    }
 
     public override void _Ready()
     {
@@ -34,7 +47,8 @@ public partial class PlayerController : CharacterBody3D
             return;
         }
 
-        if (inputEvent is not InputEventMouseMotion mouseMotion ||
+        if (_drivingMode ||
+            inputEvent is not InputEventMouseMotion mouseMotion ||
             Input.MouseMode != Input.MouseModeEnum.Captured)
         {
             return;
@@ -51,7 +65,17 @@ public partial class PlayerController : CharacterBody3D
 
     public override void _PhysicsProcess(double deltaValue)
     {
-        float delta = (float)deltaValue;
+        if (_drivingMode)
+        {
+            Drive((float)deltaValue);
+            return;
+        }
+
+        Walk((float)deltaValue);
+    }
+
+    private void Walk(float delta)
+    {
         Vector3 velocity = Velocity;
 
         if (!IsOnFloor())
@@ -78,5 +102,49 @@ public partial class PlayerController : CharacterBody3D
 
         Velocity = velocity;
         MoveAndSlide();
+    }
+
+    private void Drive(float delta)
+    {
+        Vector3 velocity = Velocity;
+        if (!IsOnFloor())
+        {
+            velocity.Y -= _gravity * delta;
+        }
+
+        float throttle = Input.GetActionStrength("move_forward") -
+            Input.GetActionStrength("move_back");
+        float targetSpeed = throttle >= 0.0f
+            ? throttle * DriveForwardSpeed
+            : throttle * DriveReverseSpeed;
+        float acceleration = Mathf.Abs(targetSpeed) < Mathf.Abs(_driveSpeed)
+            ? DriveBraking
+            : DriveAcceleration;
+        if (Mathf.IsZeroApprox(throttle))
+        {
+            targetSpeed = 0.0f;
+            acceleration = DriveCoastDeceleration;
+        }
+        _driveSpeed = Mathf.MoveToward(_driveSpeed, targetSpeed, acceleration * delta);
+
+        float steering = Input.GetActionStrength("move_left") -
+            Input.GetActionStrength("move_right");
+        float speedRatio = Mathf.Clamp(Mathf.Abs(_driveSpeed) / DriveForwardSpeed, 0.18f, 1.0f);
+        float directionSign = Mathf.IsZeroApprox(_driveSpeed) ? 1.0f : Mathf.Sign(_driveSpeed);
+        RotateY(steering * DriveTurnRate * speedRatio * directionSign * delta);
+
+        Vector3 forward = -GlobalTransform.Basis.Z;
+        Vector3 planar = forward * _driveSpeed;
+        velocity.X = planar.X;
+        velocity.Z = planar.Z;
+        Velocity = velocity;
+        FloorSnapLength = 0.55f;
+        FloorMaxAngle = Mathf.DegToRad(52.0f);
+        MoveAndSlide();
+
+        if (IsOnWall())
+        {
+            _driveSpeed *= 0.55f;
+        }
     }
 }

@@ -86,7 +86,7 @@ def max_entities(environment: Mapping[str, str] | None = None) -> int:
     return value
 
 
-def _entities(world: Mapping[str, Any], limit: int) -> list[dict[str, Any]]:
+def _entity_segments(world: Mapping[str, Any], limit: int) -> list[tuple[str, list[dict[str, Any]]]]:
     candidates: list[dict[str, Any]] = []
     for kind, values in (
         ("building", world["buildings"]),
@@ -114,7 +114,6 @@ def _entities(world: Mapping[str, Any], limit: int) -> list[dict[str, Any]]:
         }
         for value in world["regions"]
     ]
-    region_by_id = {value["id"]: value for value in world["regions"]}
     roads = [
         {
             "kind": "road",
@@ -123,23 +122,15 @@ def _entities(world: Mapping[str, Any], limit: int) -> list[dict[str, Any]]:
             "scale": [value["width"], 1.0, 1.0],
             "from": value["from"],
             "to": value["to"],
-            "waypoints": [
-                [
-                    region_by_id[value["from"]]["center"][0],
-                    region_by_id[value["from"]]["elevation"],
-                    region_by_id[value["from"]]["center"][2],
-                ],
-                *copy.deepcopy(value["waypoints"]),
-                [
-                    region_by_id[value["to"]]["center"][0],
-                    region_by_id[value["to"]]["elevation"],
-                    region_by_id[value["to"]]["center"][2],
-                ],
-            ],
+            "waypoints": copy.deepcopy(value["waypoints"]),
         }
         for value in world["roads"]
     ]
-    return [*regions, *roads, *placed]
+    return [
+        ("regions", regions),
+        ("roads", roads),
+        ("objects", placed),
+    ]
 
 
 def default_source() -> str:
@@ -214,6 +205,68 @@ def _validate_response(document: Any, expected_ids: tuple[str, ...]) -> str:
     return body.strip()
 
 
+def _generate_segment(
+    runtime: agents.MultiAgentRuntime,
+    prompt: str,
+    style: Mapping[str, Any],
+    segment_name: str,
+    selected: list[dict[str, Any]],
+    *,
+    revision: int,
+    visual_feedback: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    expected_ids = tuple(item["id"] for item in selected)
+    if not expected_ids:
+        return "", {
+            "name": segment_name,
+            "status": "empty",
+            "entity_ids": [],
+            "error_type": None,
+        }
+
+    payload = {
+        "original_prompt": prompt,
+        "style": copy.deepcopy(dict(style)),
+        "segment": segment_name,
+        "entities": selected,
+        "revision": revision,
+        "visual_feedback": (
+            copy.deepcopy(dict(visual_feedback))
+            if isinstance(visual_feedback, Mapping)
+            else None
+        ),
+    }
+    task_id = f"code_{segment_name}_{revision + 1:02d}"
+    try:
+        provider = runtime.subagent(agents.AgentRole.CODE_OBJECT, task_id)
+        response = provider.generate_json(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    ),
+                },
+            ],
+            json_schema=RESPONSE_SCHEMA,
+            schema_name=f"prompt_to_play_code_{segment_name}",
+        )
+        return _validate_response(response, expected_ids), {
+            "name": segment_name,
+            "status": "generated",
+            "entity_ids": list(expected_ids),
+            "error_type": None,
+        }
+    except Exception as exc:
+        return "", {
+            "name": segment_name,
+            "status": "fallback",
+            "entity_ids": [],
+            "error_type": type(exc).__name__,
+        }
+
+
 def generate_code_objects(
     runtime: agents.MultiAgentRuntime,
     prompt: str,
@@ -228,9 +281,10 @@ def generate_code_objects(
     root = Path(project_root).resolve(strict=True)
     output = root / GENERATED_SOURCE_PATH
     output.parent.mkdir(parents=True, exist_ok=True)
-    selected = _entities(world, max_entities(environment))
-    expected_ids = tuple(item["id"] for item in selected)
-    if not selected:
+    segments = _entity_segments(world, max_entities(environment))
+    all_selected = [item for _name, values in segments for item in values]
+    expected_ids = tuple(item["id"] for item in all_selected)
+    if not all_selected:
         output.write_text(default_source(), encoding="utf-8", newline="\n")
         return CodeObjectResult(
             status="empty",
@@ -244,41 +298,41 @@ def generate_code_objects(
             },
         )
 
-    payload = {
-        "original_prompt": prompt,
-        "style": copy.deepcopy(world["style"]),
-        "entities": selected,
-        "revision": revision,
-        "visual_feedback": (
-            copy.deepcopy(dict(visual_feedback))
-            if isinstance(visual_feedback, Mapping)
-            else None
-        ),
-    }
-    try:
-        task_id = f"code_objects_{revision + 1:02d}"
-        provider = runtime.subagent(agents.AgentRole.CODE_OBJECT, task_id)
-        response = provider.generate_json(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT.strip()},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        payload, ensure_ascii=False, separators=(",", ":")
-                    ),
-                },
-            ],
-            json_schema=RESPONSE_SCHEMA,
-            schema_name="prompt_to_play_code_objects",
+    bodies: list[str] = []
+    segment_records: list[dict[str, Any]] = []
+    for segment_name, selected in segments:
+        body, segment_record = _generate_segment(
+            runtime,
+            prompt,
+            world["style"],
+            segment_name,
+            selected,
+            revision=revision,
+            visual_feedback=visual_feedback,
         )
-        body = _validate_response(response, expected_ids)
-        source = _wrap_source(body)
-        status = "generated"
-        error_type = None
-    except Exception as exc:
-        source = default_source()
-        status = "fallback"
-        error_type = type(exc).__name__
+        if body:
+            bodies.append(body)
+        segment_records.append(segment_record)
+
+    generated_ids = tuple(
+        entity_id
+        for segment in segment_records
+        for entity_id in segment["entity_ids"]
+    )
+    source = _wrap_source("\n".join(bodies) if bodies else None)
+    generated_count = sum(
+        segment["status"] == "generated" for segment in segment_records
+    )
+    status = (
+        "generated" if generated_count == len(segment_records)
+        else "partial" if generated_count else "fallback"
+    )
+    error_types = [
+        f"{segment['name']}:{segment['error_type']}"
+        for segment in segment_records
+        if segment["error_type"]
+    ]
+    error_type = ";".join(error_types) or None
 
     output.write_text(source, encoding="utf-8", newline="\n")
     source_sha256 = contracts.document_sha256({"source": source})
@@ -286,11 +340,12 @@ def generate_code_objects(
         "schema": CODE_OBJECT_SCHEMA,
         "status": status,
         "revision": revision,
-        "entity_ids": list(expected_ids if status == "generated" else ()),
+        "entity_ids": list(generated_ids),
         "source_sha256": source_sha256,
         "error_type": error_type,
+        "segments": segment_records,
     }
-    return CodeObjectResult(status, expected_ids if status == "generated" else (), output, record)
+    return CodeObjectResult(status, generated_ids, output, record)
 
 
 __all__ = [

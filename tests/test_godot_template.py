@@ -111,6 +111,22 @@ class GodotTemplateTests(unittest.TestCase):
         self.assertIn('"CenterMarking"', self.runtime)
         self.assertIn('cameraSpec.Kind != "orbit"', self.runtime)
 
+    def test_runtime_derives_vehicle_player_for_racing_worlds(self):
+        player = (SCRIPTS / "PlayerController.cs").read_text(encoding="utf-8")
+        self.assertIn("Configure(bool drivingMode)", player)
+        self.assertIn("Drive(float delta)", player)
+        self.assertIn("BuildVehicleVisual(player)", self.runtime)
+        self.assertIn("ResolvePlayerSpawn(drivingMode)", self.runtime)
+        self.assertIn("VehicleBody", self.runtime)
+        self.assertIn("IsDrivingWorld()", self.runtime)
+        self.assertIn('"W/S 加速制动 · A/D 转向', self.runtime)
+
+    def test_runtime_uses_topology_connectors_and_non_racing_road_scale(self):
+        self.assertIn("BuildRoadConnectors();", self.runtime)
+        self.assertIn("BuildConnectorPath", self.runtime)
+        self.assertIn("float visualWidth = racingTrack ? road.Width", self.runtime)
+        self.assertIn("RoadEndpointAtRegion", self.runtime)
+
     def test_interactables_try_catalog_assets_before_glow_primitive(self):
         start = self.runtime.index("private void BuildInteractables()")
         section = self.runtime[start:self.runtime.index("private void BuildExit()", start)]

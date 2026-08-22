@@ -240,6 +240,8 @@ class PipelineStageTests(unittest.TestCase):
                     "refine_01_layout",
                     "refine_01_gameplay",
                     "refine_01_lighting_camera",
+                    "code_regions_01",
+                    "code_roads_01",
                     "code_objects_01",
                 },
             )
@@ -1017,11 +1019,15 @@ class PipelineStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 [payload["revision"] for payload in CodeProvider.payloads],
-                [0, 1, 2],
+                [0, 0, 0, 1, 1, 1, 2, 2, 2],
+            )
+            self.assertEqual(
+                [payload["segment"] for payload in CodeProvider.payloads],
+                ["regions", "roads", "objects"] * 3,
             )
             self.assertIsNone(CodeProvider.payloads[0]["visual_feedback"])
             self.assertEqual(
-                CodeProvider.payloads[1]["visual_feedback"]["issues"][0][
+                CodeProvider.payloads[3]["visual_feedback"]["issues"][0][
                     "code"
                 ],
                 "landmark_too_small",

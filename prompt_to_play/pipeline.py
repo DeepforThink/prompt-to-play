@@ -1578,7 +1578,7 @@ class PipelineStages:
                     record_path,
                     f"revision {revision} code object record",
                 )
-                if code_record.get("status") != "generated":
+                if code_record.get("status") not in {"generated", "partial"}:
                     raise
                 source_path = project_dir / code_objects.GENERATED_SOURCE_PATH
                 source_path.write_text(
