@@ -72,6 +72,7 @@ class ProviderConfigTests(unittest.TestCase):
                 "PROMPT_TO_PLAY_API_STYLE": "responses",
                 "PROMPT_TO_PLAY_TIMEOUT_SECONDS": "9.5",
                 "PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS": "2048",
+                "PROMPT_TO_PLAY_USER_AGENT": "codex_cli_rs/0.77.0 test",
             }
         )
         self.assertEqual(config.model, "local-model")
@@ -79,6 +80,48 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(config.api_style, "responses")
         self.assertEqual(config.timeout_seconds, 9.5)
         self.assertEqual(config.max_output_tokens, 2048)
+        self.assertEqual(config.user_agent, "codex_cli_rs/0.77.0 test")
+
+    def test_http_config_rejects_header_control_characters(self):
+        with self.assertRaisesRegex(
+            provider.ProviderConfigurationError, "control characters"
+        ):
+            provider.ProviderConfig.from_env(
+                {
+                    "PROMPT_TO_PLAY_API_KEY": "test-key",
+                    "PROMPT_TO_PLAY_USER_AGENT": "valid-prefix\r\ninjected: value",
+                }
+            )
+        with self.assertRaisesRegex(
+            provider.ProviderConfigurationError, "API key.*control characters"
+        ):
+            provider.ProviderConfig.from_env(
+                {"PROMPT_TO_PLAY_API_KEY": "test-key\r\ninjected: value"}
+            )
+
+    def test_http_config_rejects_unsafe_remote_urls(self):
+        unsafe_urls = (
+            "http://example.test/v1",
+            "https://user:password@example.test/v1",
+            "https://example.test/v1;parameter",
+            "https://example.test/v1?route=other",
+            "https://example.test/v1#fragment",
+            "https://:443/v1",
+            "https://example.test:invalid/v1",
+        )
+        for base_url in unsafe_urls:
+            with self.subTest(base_url=base_url):
+                with self.assertRaises(provider.ProviderConfigurationError):
+                    provider.ProviderConfig.from_env(
+                        {
+                            "PROMPT_TO_PLAY_API_KEY": "test-key",
+                            "PROMPT_TO_PLAY_BASE_URL": base_url,
+                        }
+                    )
+
+    def test_provider_config_repr_does_not_expose_api_key(self):
+        config = provider.ProviderConfig(api_key="sk-sensitive", model="m")
+        self.assertNotIn("sk-sensitive", repr(config))
 
     def test_auto_prefers_api_key_then_falls_back_to_codex(self):
         selected = provider.create_provider_from_env(
@@ -90,6 +133,15 @@ class ProviderConfigTests(unittest.TestCase):
                 {"PROMPT_TO_PLAY_REPO": str(ROOT)}
             )
         self.assertIsInstance(selected, provider.CodexCliProvider)
+
+    def test_http_mode_selects_compatible_provider(self):
+        selected = provider.create_provider_from_env(
+            {
+                "PROMPT_TO_PLAY_PROVIDER": "http",
+                "PROMPT_TO_PLAY_API_KEY": "key",
+            }
+        )
+        self.assertIsInstance(selected, provider.OpenAICompatibleProvider)
 
     def test_auto_reports_when_neither_auth_path_exists(self):
         with mock.patch.object(provider.shutil, "which", return_value=None):
@@ -144,7 +196,9 @@ class HttpProviderTests(unittest.TestCase):
             {},
             io.BytesIO(b"echoed sk-sensitive-value and private prompt"),
         )
-        with mock.patch.object(provider.request, "urlopen", side_effect=failure):
+        opener = mock.Mock()
+        opener.open.side_effect = failure
+        with mock.patch.object(provider.request, "build_opener", return_value=opener):
             with self.assertRaises(provider.ProviderRequestError) as raised:
                 provider._default_transport(
                     "https://example.invalid/v1/responses",
@@ -153,6 +207,40 @@ class HttpProviderTests(unittest.TestCase):
                     1,
                 )
         self.assertEqual(str(raised.exception), "provider HTTP 401")
+
+    def test_redirects_are_disabled_to_keep_authorization_on_one_origin(self):
+        handler = provider._NoRedirectHandler()
+        outgoing = provider.request.Request(
+            "https://www.micuapi.ai/v1/responses",
+            headers={"Authorization": "Bearer secret"},
+        )
+        redirected = handler.redirect_request(
+            outgoing,
+            None,
+            302,
+            "Found",
+            {},
+            "https://unexpected.example/v1/responses",
+        )
+        self.assertIsNone(redirected)
+
+        failure = urlerror.HTTPError(
+            "https://www.micuapi.ai/v1/responses",
+            302,
+            "Found",
+            {"Location": "https://unexpected.example/v1/responses"},
+            None,
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = failure
+        with mock.patch.object(provider.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(provider.ProviderRequestError, "HTTP 302"):
+                provider._default_transport(
+                    "https://www.micuapi.ai/v1/responses",
+                    {"Authorization": "Bearer secret"},
+                    b"{}",
+                    1,
+                )
 
     def test_usage_summary_reads_chat_and_responses_token_fields(self):
         responses = [
@@ -235,6 +323,7 @@ class HttpProviderTests(unittest.TestCase):
 
         def transport(url, headers, payload, timeout):
             captured["url"] = url
+            captured["headers"] = headers
             captured["payload"] = json.loads(payload.decode("utf-8"))
             response = {
                 "output": [
@@ -249,6 +338,7 @@ class HttpProviderTests(unittest.TestCase):
                 model="m",
                 base_url="https://example.test/v1",
                 api_style="responses",
+                user_agent="codex_cli_rs/0.77.0 test",
             ),
             transport=transport,
         )
@@ -259,6 +349,9 @@ class HttpProviderTests(unittest.TestCase):
         )
         self.assertEqual(document, {"ok": True})
         self.assertEqual(captured["url"], "https://example.test/v1/responses")
+        self.assertEqual(
+            captured["headers"]["User-Agent"], "codex_cli_rs/0.77.0 test"
+        )
         self.assertEqual(captured["payload"]["text"]["format"]["type"], "json_schema")
 
     def test_chat_and_responses_encode_local_images_as_data_urls(self):

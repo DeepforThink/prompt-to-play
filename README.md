@@ -41,9 +41,11 @@ launcher (it prompts locally for the three required credentials):
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ImageProvider gemini
 ```
 
-The launcher defaults all three model roles to `gpt-5.6-sol`; override it with
-`-Model <model-id>`. To run with only the model API and accept primitive asset
-fallbacks, add `-AssetMode off`; that mode prompts for only the OpenAI key.
+The launcher defaults to Micu's OpenAI Responses-compatible endpoint and all
+three model roles use `gpt-5.6-sol`; override the model with `-Model <model-id>`.
+Use `-ApiProvider openai` only when the official OpenAI endpoint is intended.
+To run with only the model API and accept primitive asset fallbacks, add
+`-AssetMode off`; that mode prompts for only the selected provider's key.
 
 Enter any world description, optionally add reference images, and choose
 `生成并启动`. The launcher performs structured planning, contract validation,
@@ -66,6 +68,11 @@ For the complete realistic-asset path, configure an image provider key
 is paid and therefore defaults to `off`; cache hits remain available in every
 mode. The Windows launcher above does not write keys to disk, logs,
 command-line arguments, or Git.
+
+For Micu, the launcher fixes the base URL to `https://www.micuapi.ai/v1`, uses
+the Responses protocol, and supplies the Codex-style User-Agent required by its
+compatibility gateway. Direct environment-based startup can configure the same
+header with `PROMPT_TO_PLAY_USER_AGENT`.
 
 Do not paste API keys into source files or chat messages. The script places
 them only in the launched process environment and removes its own copies after

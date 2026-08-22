@@ -1,4 +1,6 @@
 param(
+    [ValidateSet("micu", "openai")]
+    [string]$ApiProvider = "micu",
     [ValidateSet("grok", "gemini")]
     [string]$ImageProvider = "gemini",
     [ValidateSet("off", "auto", "required")]
@@ -41,22 +43,69 @@ elseif (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
     throw "Python executable not found: $PythonExecutable"
 }
 
-$openAiKey = ConvertFrom-MaskedInput "OpenAI API Key"
+$apiBaseUrl = if ($ApiProvider -eq "micu") {
+    "https://www.micuapi.ai/v1"
+}
+else {
+    "https://api.openai.com/v1"
+}
+$apiUserAgent = if ($ApiProvider -eq "micu") {
+    "codex_cli_rs/0.77.0 (Windows 10.0.26100; x86_64) WindowsTerminal"
+}
+else {
+    "prompt-to-play/1.0"
+}
+$apiKeyLabel = if ($ApiProvider -eq "micu") { "Micu API Key" } else { "OpenAI API Key" }
+$apiKey = $null
 $tripoKey = $null
 $imageKey = $null
-if ($AssetMode -ne "off") {
-    $tripoKey = ConvertFrom-MaskedInput "Tripo3D API Key"
-    $imageLabel = if ($ImageProvider -eq "grok") { "xAI API Key" } else { "Gemini API Key" }
-    $imageKey = ConvertFrom-MaskedInput $imageLabel
+
+$managedEnvironmentNames = @(
+    "PROMPT_TO_PLAY_PROVIDER",
+    "PROMPT_TO_PLAY_API_STYLE",
+    "PROMPT_TO_PLAY_BASE_URL",
+    "PROMPT_TO_PLAY_USER_AGENT",
+    "PROMPT_TO_PLAY_MODEL",
+    "PROMPT_TO_PLAY_API_KEY",
+    "PROMPT_TO_PLAY_ASSET_MODE",
+    "PROMPT_TO_PLAY_ASSET_IMAGE_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "TRIPO3D_API_KEY",
+    "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY"
+)
+$previousEnvironment = @{}
+foreach ($environmentName in $managedEnvironmentNames) {
+    $previousValue = [Environment]::GetEnvironmentVariable($environmentName, "Process")
+    if ($null -ne $previousValue) {
+        $previousEnvironment[$environmentName] = $previousValue
+    }
 }
 
 try {
-    $env:PROMPT_TO_PLAY_PROVIDER = "openai"
+    Write-Host "Model endpoint: $apiBaseUrl/responses ($ApiProvider)"
+    $apiKey = ConvertFrom-MaskedInput $apiKeyLabel
+    if ($AssetMode -ne "off") {
+        $tripoKey = ConvertFrom-MaskedInput "Tripo3D API Key"
+        $imageLabel = if ($ImageProvider -eq "grok") { "xAI API Key" } else { "Gemini API Key" }
+        $imageKey = ConvertFrom-MaskedInput $imageLabel
+    }
+
+    $env:PROMPT_TO_PLAY_PROVIDER = "http"
     $env:PROMPT_TO_PLAY_API_STYLE = "responses"
+    $env:PROMPT_TO_PLAY_BASE_URL = $apiBaseUrl
+    $env:PROMPT_TO_PLAY_USER_AGENT = $apiUserAgent
     $env:PROMPT_TO_PLAY_MODEL = $Model
-    $env:PROMPT_TO_PLAY_API_KEY = $openAiKey
+    $env:PROMPT_TO_PLAY_API_KEY = $apiKey
     $env:PROMPT_TO_PLAY_ASSET_MODE = $AssetMode
     $env:PROMPT_TO_PLAY_ASSET_IMAGE_MODEL = $ImageProvider
+    Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:OPENAI_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:OPENAI_MODEL -ErrorAction SilentlyContinue
+    Remove-Item Env:GOOGLE_API_KEY -ErrorAction SilentlyContinue
     if ($AssetMode -eq "off") {
         Remove-Item Env:TRIPO3D_API_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:XAI_API_KEY -ErrorAction SilentlyContinue
@@ -82,12 +131,14 @@ try {
     Write-Host "Prompt-to-Play started (PID $($process.Id))."
 }
 finally {
-    $openAiKey = $null
+    $apiKey = $null
     $tripoKey = $null
     $imageKey = $null
-    Remove-Item Env:PROMPT_TO_PLAY_API_KEY -ErrorAction SilentlyContinue
-    Remove-Item Env:PROMPT_TO_PLAY_MODEL -ErrorAction SilentlyContinue
-    Remove-Item Env:TRIPO3D_API_KEY -ErrorAction SilentlyContinue
-    Remove-Item Env:XAI_API_KEY -ErrorAction SilentlyContinue
-    Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
+    foreach ($environmentName in $managedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($environmentName, $null, "Process")
+    }
+    foreach ($entry in $previousEnvironment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+    $previousEnvironment = $null
 }

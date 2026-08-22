@@ -7,11 +7,13 @@ one vendor or model:
 ``PROMPT_TO_PLAY_MODEL`` (or ``OPENAI_MODEL``)
 ``PROMPT_TO_PLAY_BASE_URL`` (or ``OPENAI_BASE_URL``)
 ``PROMPT_TO_PLAY_API_STYLE`` (``chat_completions`` or ``responses``)
+``PROMPT_TO_PLAY_USER_AGENT`` (optional compatibility header for API gateways)
 ``PROMPT_TO_PLAY_TIMEOUT_SECONDS`` and ``PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS``
 
 ``PROMPT_TO_PLAY_PROVIDER`` defaults to ``auto``: use the HTTP provider when
 an API key exists, otherwise reuse the signed-in ``codex`` CLI. Set it to
-``openai`` or ``codex`` to force a backend. ``PROMPT_TO_PLAY_CODEX_COMMAND``
+``http`` (or the legacy alias ``openai``) or ``codex`` to force a backend.
+``PROMPT_TO_PLAY_CODEX_COMMAND``
 and ``PROMPT_TO_PLAY_REPO`` override the CLI executable and read-only workspace.
 """
 
@@ -24,7 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib import error, parse, request
@@ -33,7 +35,7 @@ from urllib import error, parse, request
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5-mini"
 API_STYLES = ("chat_completions", "responses")
-PROVIDER_MODES = ("auto", "openai", "codex")
+PROVIDER_MODES = ("auto", "http", "openai", "codex")
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 IMAGE_MIME_TYPES = {
     ".bmp": "image/bmp",
@@ -90,19 +92,26 @@ def _positive_integer(value: str, name: str) -> int:
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    api_key: str
+    api_key: str = field(repr=False)
     model: str
     base_url: str = DEFAULT_BASE_URL
     api_style: str = "chat_completions"
     timeout_seconds: float = 120.0
     max_output_tokens: int = 12000
+    user_agent: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "ProviderConfig":
         env = os.environ if environ is None else environ
-        api_key = (
+        raw_api_key = (
             env.get("PROMPT_TO_PLAY_API_KEY") or env.get("OPENAI_API_KEY") or ""
-        ).strip()
+        )
+        if any(
+            ord(character) < 32 or ord(character) == 127
+            for character in raw_api_key
+        ):
+            raise ProviderConfigurationError("API key must not contain control characters")
+        api_key = raw_api_key.strip()
         if not api_key:
             raise ProviderConfigurationError(
                 "missing API key; set PROMPT_TO_PLAY_API_KEY or OPENAI_API_KEY"
@@ -122,6 +131,35 @@ class ProviderConfig:
             raise ProviderConfigurationError(
                 "PROMPT_TO_PLAY_BASE_URL must be an absolute http(s) URL"
             )
+        try:
+            parsed_port = parsed.port
+        except ValueError as exc:
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_BASE_URL contains an invalid port"
+            ) from exc
+        if not parsed.hostname or (parsed_port is not None and parsed_port < 1):
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_BASE_URL must contain a valid host and port"
+            )
+        if (
+            parsed.username
+            or parsed.password
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_BASE_URL must not contain credentials, params, query, "
+                "or fragment"
+            )
+        if parsed.scheme == "http" and parsed.hostname not in (
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        ):
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_BASE_URL must use HTTPS unless it targets loopback"
+            )
         api_style = env.get("PROMPT_TO_PLAY_API_STYLE", "chat_completions").strip()
         if api_style not in API_STYLES:
             raise ProviderConfigurationError(
@@ -135,6 +173,14 @@ class ProviderConfig:
             env.get("PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS", "12000"),
             "PROMPT_TO_PLAY_MAX_OUTPUT_TOKENS",
         )
+        user_agent = env.get("PROMPT_TO_PLAY_USER_AGENT", "").strip()
+        if any(
+            ord(character) < 32 or ord(character) == 127
+            for character in user_agent
+        ):
+            raise ProviderConfigurationError(
+                "PROMPT_TO_PLAY_USER_AGENT must not contain control characters"
+            )
         return cls(
             api_key=api_key,
             model=model,
@@ -142,6 +188,7 @@ class ProviderConfig:
             api_style=api_style,
             timeout_seconds=timeout,
             max_output_tokens=max_output_tokens,
+            user_agent=user_agent or None,
         )
 
 
@@ -185,9 +232,12 @@ def _default_transport(
     payload: bytes,
     timeout_seconds: float,
 ) -> bytes:
-    outgoing = request.Request(url, data=payload, headers=dict(headers), method="POST")
     try:
-        with request.urlopen(outgoing, timeout=timeout_seconds) as response:
+        outgoing = request.Request(
+            url, data=payload, headers=dict(headers), method="POST"
+        )
+        opener = request.build_opener(_NoRedirectHandler())
+        with opener.open(outgoing, timeout=timeout_seconds) as response:
             return response.read()
     except error.HTTPError as exc:
         # Compatible endpoints sometimes echo request headers or submitted
@@ -198,6 +248,23 @@ def _default_transport(
         raise ProviderRequestError(f"provider request failed: {exc.reason}") from exc
     except OSError as exc:
         raise ProviderRequestError(f"provider request failed: {exc}") from exc
+    except (TypeError, ValueError) as exc:
+        raise ProviderRequestError("provider request configuration is invalid") from exc
+
+
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    """Keep bearer credentials on the configured origin only."""
+
+    def redirect_request(
+        self,
+        req: request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Mapping[str, str],
+        newurl: str,
+    ) -> None:
+        return None
 
 
 def _message_text(content: Any) -> str | None:
@@ -484,6 +551,8 @@ class OpenAICompatibleProvider:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if self.config.user_agent:
+            headers["User-Agent"] = self.config.user_agent
         raw = self._transport(
             self._endpoint(), headers, encoded, self.config.timeout_seconds
         )
@@ -897,12 +966,12 @@ def create_provider_from_env(
     mode = env.get("PROMPT_TO_PLAY_PROVIDER", "auto").strip().lower()
     if mode not in PROVIDER_MODES:
         raise ProviderConfigurationError(
-            "PROMPT_TO_PLAY_PROVIDER must be 'auto', 'openai', or 'codex'"
+            "PROMPT_TO_PLAY_PROVIDER must be 'auto', 'http', 'openai', or 'codex'"
         )
     has_key = bool(
         (env.get("PROMPT_TO_PLAY_API_KEY") or env.get("OPENAI_API_KEY") or "").strip()
     )
-    if mode == "openai" or (mode == "auto" and has_key):
+    if mode in ("http", "openai") or (mode == "auto" and has_key):
         return OpenAICompatibleProvider(ProviderConfig.from_env(env))
 
     config = CodexCliConfig.from_env(env)

@@ -232,7 +232,7 @@ class MultiAgentRuntime:
         env = dict(environment)
         # Runtime generation is API-first. Codex CLI remains available only
         # when a developer explicitly selects it.
-        env.setdefault("PROMPT_TO_PLAY_PROVIDER", "openai")
+        env.setdefault("PROMPT_TO_PLAY_PROVIDER", "http")
         role_model = env.get(ROLE_MODEL_ENV[role], "").strip()
         if role_model:
             env["PROMPT_TO_PLAY_MODEL"] = role_model
