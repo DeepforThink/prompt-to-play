@@ -583,7 +583,7 @@ class PipelineStageTests(unittest.TestCase):
             (adjacent / "Godot.NET.Sdk.4.7.1.nupkg").write_bytes(b"package")
             self.assertEqual(pipeline._find_nupkgs(godot), adjacent.resolve())
 
-    def test_api_loop_keeps_last_valid_revision_when_next_repair_is_invalid(self):
+    def test_api_loop_isolates_an_invalid_repair_subagent(self):
         class PlannerProvider:
             def generate_json(self, *_args, **_kwargs):
                 return copy.deepcopy(read_fixture_world())
@@ -617,8 +617,23 @@ class PipelineStageTests(unittest.TestCase):
                                 "camera_id": "overview",
                                 "message": "The main landmark is visually weak.",
                                 "suggested_fix": "Move the first building closer to the overview camera.",
+                                "domain": "layout",
+                                "suggested_changes": [
+                                    {
+                                        "target_kind": "prop",
+                                        "target_id": "ancient_oak",
+                                        "field": "position",
+                                        "instruction": "Move the landmark into a stronger foreground position.",
+                                        "expected_effect": "The landmark becomes immediately readable.",
+                                    }
+                                ],
                             }
                         ],
+                    }
+                if self.calls == 3:
+                    return {
+                        "provider_secret": "sk-sensitive-evaluator-output",
+                        "issues": "not-an-array",
                     }
                 return {
                     "camera_evaluations": [
@@ -640,7 +655,53 @@ class PipelineStageTests(unittest.TestCase):
                             "camera_id": "overview",
                             "message": "The repaired landmark is still visually weak.",
                             "suggested_fix": "Increase its visual prominence.",
-                        }
+                            "domain": "layout",
+                            "suggested_changes": [
+                                {
+                                    "target_kind": "prop",
+                                    "target_id": "ancient_oak",
+                                    "field": "scale",
+                                    "instruction": "Increase the landmark scale in the overview composition.",
+                                    "expected_effect": "The landmark dominates the intended focal area.",
+                                }
+                            ],
+                        },
+                        {
+                            "code": "interaction_label_unclear",
+                            "severity": "minor",
+                            "entity_id": "mural_clue",
+                            "camera_id": "overview",
+                            "message": "The interaction purpose is unclear.",
+                            "suggested_fix": "Clarify the interaction label.",
+                            "domain": "gameplay",
+                            "suggested_changes": [
+                                {
+                                    "target_kind": "interactable",
+                                    "target_id": "mural_clue",
+                                    "field": "label",
+                                    "instruction": "Clarify the interaction label.",
+                                    "expected_effect": "The interaction purpose becomes readable.",
+                                }
+                            ],
+                        },
+                        {
+                            "code": "flat_key_light",
+                            "severity": "major",
+                            "entity_id": "moonlight",
+                            "camera_id": "overview",
+                            "message": "The focal lighting is too flat.",
+                            "suggested_fix": "Strengthen the key light.",
+                            "domain": "lighting_camera",
+                            "suggested_changes": [
+                                {
+                                    "target_kind": "light",
+                                    "target_id": "moonlight",
+                                    "field": "energy",
+                                    "instruction": "Increase the key light energy.",
+                                    "expected_effect": "The focal region gains contrast.",
+                                }
+                            ],
+                        },
                     ],
                 }
 
@@ -656,9 +717,19 @@ class PipelineStageTests(unittest.TestCase):
                 payload = json.loads(messages[-1]["content"])
                 self.payloads.append(payload)
                 revised = copy.deepcopy(payload["current_world"])
-                revised["props"][0]["position"][0] += 1
-                if len(self.payloads) == 2:
+                task_id = payload["task_id"]
+                if task_id == "repair_01_layout":
+                    revised["props"][0]["position"][0] += 1
+                elif task_id == "repair_01_gameplay":
+                    revised["interactions"]["interactables"][0]["label"] += "!"
+                elif task_id == "repair_01_lighting_camera":
+                    revised["lights"][0]["energy"] += 1
+                elif task_id == "repair_02_layout":
                     revised["roads"][0]["to"] = revised["roads"][0]["from"]
+                elif task_id == "repair_02_gameplay":
+                    revised["interactions"]["interactables"][0]["label"] += "?"
+                elif task_id == "repair_02_lighting_camera":
+                    revised["lights"][0]["energy"] += 1
                 return revised
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -859,9 +930,32 @@ class PipelineStageTests(unittest.TestCase):
                     / "patch_to_rev_1.json"
                 ).is_file()
             )
+            second_repair_record = json.loads(
+                (
+                    project
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / "rev_1"
+                    / "repair_to_rev_2.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [task["status"] for task in second_repair_record["tasks"]],
+                ["rejected", "applied", "applied"],
+            )
+            self.assertIn(
+                "road endpoints",
+                second_repair_record["tasks"][0]["rejection_reason"],
+            )
             evaluations = state.require_result(pipeline.EVALUATIONS_RESULT)
-            self.assertEqual([item["iteration"] for item in evaluations], [0, 1])
-            self.assertEqual([item["status"] for item in evaluations], ["fail", "fail"])
+            self.assertEqual(
+                [item["iteration"] for item in evaluations], [0, 1, 2]
+            )
+            self.assertEqual(
+                [item["status"] for item in evaluations],
+                ["fail", "fail", "fail"],
+            )
             self.assertEqual(evaluations[1]["metrics"]["reproducibility"], 0.5)
             delivery = json.loads(
                 (project / "artifacts" / "runs" / run_id / "delivery.json").read_text(
@@ -872,16 +966,62 @@ class PipelineStageTests(unittest.TestCase):
             self.assertFalse(delivery["evaluation_passed"])
             self.assertEqual(delivery["revision"], 1)
             self.assertEqual(
-                delivery["correction_stop"]["reason"], "repair_rejected"
+                delivery["correction_stop"]["reason"],
+                "visual_evaluation_rejected",
             )
-            self.assertIn("road endpoints", delivery["correction_stop"]["message"])
+            self.assertEqual(
+                delivery["visual_guidance"][0]["suggested_changes"][0]["field"],
+                "scale",
+            )
+            evaluation_error_path = (
+                project
+                / "artifacts"
+                / "runs"
+                / run_id
+                / "rev_2"
+                / "visual_evaluation_error.json"
+            )
+            evaluation_error = json.loads(
+                evaluation_error_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                evaluation_error["schema"],
+                "prompt-to-play/visual-evaluation-error@1",
+            )
+            self.assertEqual(evaluation_error["status"], "rejected")
+            self.assertEqual(
+                evaluation_error["error_type"], "VisualFeedbackContractError"
+            )
+            self.assertEqual(
+                delivery["visual_evaluation_error"], evaluation_error
+            )
+            self.assertFalse(
+                (
+                    project / "artifacts" / "runs" / run_id / "rev_2"
+                    / "visual_feedback.json"
+                ).exists()
+            )
+            persisted_error = evaluation_error_path.read_text(encoding="utf-8")
+            persisted_delivery = (
+                project / "artifacts" / "runs" / run_id / "delivery.json"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("sk-sensitive-evaluator-output", persisted_error)
+            self.assertNotIn("sk-sensitive-evaluator-output", persisted_delivery)
+            self.assertNotIn(
+                "repair_03",
+                [payload["task_id"] for payload in RepairProvider.payloads],
+            )
             visual_provider = role_providers[agents.AgentRole.VISUAL_EVALUATOR]
             published_reference = next((project / "references").iterdir()).resolve()
             self.assertEqual(
                 visual_provider.image_paths[0][0], published_reference
             )
             self.assertEqual(len(visual_provider.image_paths[0]), 2)
-            repair_payload = RepairProvider.payloads[0]
+            repair_payload = next(
+                payload
+                for payload in RepairProvider.payloads
+                if payload["task_id"] == "repair_01_layout"
+            )
             self.assertEqual(
                 repair_payload["structural_failures"],
                 [
@@ -892,6 +1032,13 @@ class PipelineStageTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(repair_payload["reference_image_count"], 1)
+            self.assertEqual(repair_payload["domain"], "layout")
+            self.assertEqual(
+                repair_payload["assigned_visual_issues"][0]["suggested_changes"][0][
+                    "field"
+                ],
+                "position",
+            )
             self.assertEqual(len(refinement_providers), 3)
             trace = json.loads(
                 (project / "artifacts" / "runs" / run_id / "agent_trace.json").read_text(
@@ -899,17 +1046,20 @@ class PipelineStageTests(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                [call["role"] for call in trace["calls"]],
-                [
-                    "world_planner",
-                    "world_refiner",
-                    "world_refiner",
-                    "world_refiner",
-                    "visual_evaluator",
-                    "repair",
-                    "visual_evaluator",
-                    "repair",
-                ],
+                [call["role"] for call in trace["calls"]].count("repair"), 4
+            )
+            self.assertEqual(
+                {
+                    call["task_id"]
+                    for call in trace["calls"]
+                    if call["role"] == "repair"
+                },
+                {
+                    "repair_01_layout",
+                    "repair_02_layout",
+                    "repair_02_gameplay",
+                    "repair_02_lighting_camera",
+                },
             )
             future_project = project.parent / "run-ffffffffffff"
             future_project.mkdir()

@@ -27,6 +27,22 @@ def camera_evaluation(score, camera_id="overview"):
     }
 
 
+def suggested_change(
+    target_kind="prop",
+    target_id="pipe_cluster",
+    field="scale",
+    instruction="Increase the landmark scale to make it dominate the foreground.",
+    expected_effect="The requested landmark becomes immediately recognisable.",
+):
+    return {
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "field": field,
+        "instruction": instruction,
+        "expected_effect": expected_effect,
+    }
+
+
 def rejected_observation(entity_id="pipe_cluster", camera_id="overview"):
     return {
         "camera_evaluations": [camera_evaluation(0.52, camera_id)],
@@ -38,6 +54,10 @@ def rejected_observation(entity_id="pipe_cluster", camera_id="overview"):
                 "camera_id": camera_id,
                 "message": "The requested landmark is not visually recognisable.",
                 "suggested_fix": "Move and enlarge the landmark near the camera.",
+                "domain": "layout",
+                "suggested_changes": [
+                    suggested_change(target_id=entity_id),
+                ],
             }
         ],
     }
@@ -76,6 +96,40 @@ class FakeProvider:
 
 
 class VisualEvaluationAgentTests(unittest.TestCase):
+    def test_agent_distinguishes_provider_failure_from_output_contract_failure(self):
+        world = read_world()
+
+        class FailingProvider:
+            def generate_json(self, *_args, **_kwargs):
+                raise RuntimeError("sk-sensitive-provider-detail")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            screenshot = root / "overview.png"
+            screenshot.write_bytes(b"rendered pixels")
+
+            provider_agent = evaluator.VisualEvaluationAgent(
+                FailingProvider(), project_root=root
+            )
+            with self.assertRaises(
+                evaluator.VisualEvaluationProviderError
+            ) as provider_context:
+                provider_agent.evaluate(
+                    world["brief"]["text"], world, [screenshot]
+                )
+            self.assertNotIn(
+                "sk-sensitive-provider-detail", str(provider_context.exception)
+            )
+
+            contract_agent = evaluator.VisualEvaluationAgent(
+                FakeProvider({"provider_secret": "sk-sensitive-output"}),
+                project_root=root,
+            )
+            with self.assertRaises(evaluator.VisualFeedbackContractError):
+                contract_agent.evaluate(
+                    world["brief"]["text"], world, [screenshot]
+                )
+
     def test_agent_sends_screenshots_and_returns_only_strict_visual_feedback(self):
         world = read_world()
         response = {
@@ -88,6 +142,16 @@ class VisualEvaluationAgentTests(unittest.TestCase):
                     "camera_id": "overview",
                     "message": "The skyline is slightly washed out.",
                     "suggested_fix": "Improve foreground contrast.",
+                    "domain": "lighting_camera",
+                    "suggested_changes": [
+                        suggested_change(
+                            "light",
+                            "cloud_sun",
+                            "energy",
+                            "Reduce the directional light energy to restore foreground contrast.",
+                            "Foreground silhouettes separate clearly from the skyline.",
+                        )
+                    ],
                 }
             ],
         }
@@ -169,6 +233,59 @@ class VisualEvaluationAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(evaluator.EvaluatorError, "unknown WorldSpec entity"):
             evaluator.validate_visual_feedback(unknown_entity, world)
 
+    def test_detailed_guidance_is_required_and_retained(self):
+        world = read_world()
+        observation = rejected_observation()
+        result = evaluator.validate_visual_feedback(observation, world)
+
+        issue = result["issues"][0]
+        self.assertEqual(issue["domain"], "layout")
+        self.assertEqual(
+            issue["suggested_changes"],
+            observation["issues"][0]["suggested_changes"],
+        )
+
+        missing = copy.deepcopy(observation)
+        del missing["issues"][0]["suggested_changes"]
+        with self.assertRaisesRegex(
+            evaluator.EvaluatorError, "missing keys: suggested_changes"
+        ):
+            evaluator.validate_visual_feedback(missing, world)
+
+        empty = copy.deepcopy(observation)
+        empty["issues"][0]["suggested_changes"] = []
+        with self.assertRaisesRegex(
+            evaluator.EvaluatorError, "expected at least one item"
+        ):
+            evaluator.validate_visual_feedback(empty, world)
+
+    def test_detailed_guidance_validates_domain_entity_kind_and_patchable_field(
+        self,
+    ):
+        world = read_world()
+
+        wrong_domain = rejected_observation()
+        wrong_domain["issues"][0]["domain"] = "gameplay"
+        with self.assertRaisesRegex(
+            evaluator.EvaluatorError, "does not belong to domain"
+        ):
+            evaluator.validate_visual_feedback(wrong_domain, world)
+
+        wrong_kind = rejected_observation()
+        wrong_kind["issues"][0]["suggested_changes"][0]["target_kind"] = "building"
+        with self.assertRaisesRegex(evaluator.EvaluatorError, "expected 'prop'"):
+            evaluator.validate_visual_feedback(wrong_kind, world)
+
+        unknown_target = rejected_observation()
+        unknown_target["issues"][0]["suggested_changes"][0]["target_id"] = "unknown_prop"
+        with self.assertRaisesRegex(evaluator.EvaluatorError, "unknown WorldSpec entity"):
+            evaluator.validate_visual_feedback(unknown_target, world)
+
+        forbidden_field = rejected_observation()
+        forbidden_field["issues"][0]["suggested_changes"][0]["field"] = "energy"
+        with self.assertRaisesRegex(evaluator.EvaluatorError, "not patchable for 'prop'"):
+            evaluator.validate_visual_feedback(forbidden_field, world)
+
     def test_host_requires_every_camera_and_penalizes_the_worst_view(self):
         world = read_world()
         observations = {
@@ -184,6 +301,16 @@ class VisualEvaluationAgentTests(unittest.TestCase):
                     "camera_id": "detail",
                     "message": "The detail view is weak.",
                     "suggested_fix": "Reframe the detail camera.",
+                    "domain": "lighting_camera",
+                    "suggested_changes": [
+                        suggested_change(
+                            "camera",
+                            None,
+                            "fov_deg",
+                            "Narrow the detail camera field of view around the landmark.",
+                            "The landmark occupies more of the detail frame.",
+                        )
+                    ],
                 }
             ],
         }

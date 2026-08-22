@@ -32,6 +32,12 @@ REPAIR_AGENT_ROLE = "repair"
 DEFAULT_MIN_SCENE_SIMILARITY = 0.75
 ISSUE_SEVERITIES = ("info", "minor", "major", "blocker")
 BLOCKING_SEVERITIES = frozenset(("major", "blocker"))
+VISUAL_GUIDANCE_DOMAINS = ("layout", "gameplay", "lighting_camera")
+DOMAIN_TARGET_KINDS: Mapping[str, frozenset[str]] = {
+    "layout": frozenset(("region", "road", "building", "prop")),
+    "gameplay": frozenset(("interactable", "objective", "exit")),
+    "lighting_camera": frozenset(("light", "camera")),
+}
 CAMERA_SCORE_FIELDS = (
     "prompt_alignment",
     "composition",
@@ -56,6 +62,14 @@ class EvaluatorError(ValueError):
     """Raised when visual feedback or an attempted repair is unsafe or invalid."""
 
 
+class VisualFeedbackContractError(EvaluatorError):
+    """Raised when model-produced visual feedback violates the host contract."""
+
+
+class VisualEvaluationProviderError(EvaluatorError):
+    """Raised when the visual evaluation provider does not complete a call."""
+
+
 def _object(properties: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "type": "object",
@@ -64,6 +78,36 @@ def _object(properties: Mapping[str, Any]) -> dict[str, Any]:
         "additionalProperties": False,
     }
 
+
+SUGGESTED_CHANGE_JSON_SCHEMA = _object(
+    {
+        "target_kind": {
+            "type": "string",
+            "enum": list(contracts.TARGET_KINDS),
+        },
+        "target_id": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                },
+                {"type": "null"},
+            ]
+        },
+        "field": {
+            "type": "string",
+            "enum": sorted(
+                {
+                    field
+                    for fields in contracts.PATCHABLE_FIELDS.values()
+                    for field in fields
+                }
+            ),
+        },
+        "instruction": {"type": "string", "minLength": 1},
+        "expected_effect": {"type": "string", "minLength": 1},
+    }
+)
 
 VISUAL_ISSUE_JSON_SCHEMA = _object(
     {
@@ -92,6 +136,13 @@ VISUAL_ISSUE_JSON_SCHEMA = _object(
         },
         "message": {"type": "string", "minLength": 1},
         "suggested_fix": {"type": "string", "minLength": 1},
+        "domain": {"type": "string", "enum": list(VISUAL_GUIDANCE_DOMAINS)},
+        "suggested_changes": {
+            "type": "array",
+            "items": SUGGESTED_CHANGE_JSON_SCHEMA,
+            "minItems": 1,
+            "maxItems": 8,
+        },
     }
 )
 
@@ -140,7 +191,13 @@ from 0 (none) to 1 (severe or widespread). Use camera_id from the supplied
 screenshot manifest exactly. Use entity_id only when a WorldSpec entity is
 responsible; otherwise use null. Bind camera-specific issues to camera_id and
 use null only for genuinely global issues. Give stable machine-readable issue
-codes and concrete suggested fixes.
+codes and concise suggested_fix summaries. For every issue, assign exactly one
+domain: layout for region/road/building/prop changes, gameplay for
+interactable/objective/exit changes, or lighting_camera for light/camera
+changes. Provide one or more suggested_changes with the exact target kind,
+existing WorldSpec target ID when one is responsible, patchable field, concrete
+instruction, and expected visible effect. Use a null target_id only when no
+exact existing entity is the target; never invent an ID.
 
 Do not report or infer generation time, token usage, cost, structural validity,
 reproducibility, aggregate evaluation scores, acceptance, correction limits,
@@ -206,6 +263,97 @@ def _known_entity_ids(world: Mapping[str, Any]) -> set[str]:
         entity_ids.update(entity["id"] for entity in collection)
     entity_ids.add(world["interactions"]["exit"]["id"])
     return entity_ids
+
+
+def _known_entity_kinds(world: Mapping[str, Any]) -> dict[str, str]:
+    entities: dict[str, str] = {}
+    for kind, path in _COLLECTIONS:
+        collection: Any = world
+        for key in path:
+            collection = collection[key]
+        entities.update({entity["id"]: kind for entity in collection})
+    entities[world["interactions"]["exit"]["id"]] = "exit"
+    return entities
+
+
+def _normalize_suggested_changes(
+    value: Any,
+    path: str,
+    *,
+    domain: str,
+    known_entity_kinds: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise EvaluatorError(f"{path}: expected at least one item")
+    if len(value) > 8:
+        raise EvaluatorError(f"{path}: at most 8 items are allowed")
+
+    required = {
+        "target_kind",
+        "target_id",
+        "field",
+        "instruction",
+        "expected_effect",
+    }
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        change_path = f"{path}[{index}]"
+        if not isinstance(raw, Mapping):
+            raise EvaluatorError(f"{change_path}: expected an object")
+        missing = sorted(required - set(raw))
+        extra = sorted(set(raw) - required)
+        if missing:
+            raise EvaluatorError(f"{change_path}: missing keys: {', '.join(missing)}")
+        if extra:
+            raise EvaluatorError(f"{change_path}: unknown keys: {', '.join(extra)}")
+
+        target_kind = raw["target_kind"]
+        if target_kind not in contracts.TARGET_KINDS:
+            raise EvaluatorError(
+                f"{change_path}.target_kind: expected a WorldSpec target kind"
+            )
+        if target_kind not in DOMAIN_TARGET_KINDS[domain]:
+            raise EvaluatorError(
+                f"{change_path}.target_kind: {target_kind!r} does not belong to "
+                f"domain {domain!r}"
+            )
+
+        target_id = raw["target_id"]
+        if target_id is not None:
+            target_id = _nonempty_string(target_id, f"{change_path}.target_id")
+            if not contracts.ENTITY_ID_RE.fullmatch(target_id):
+                raise EvaluatorError(f"{change_path}.target_id: invalid entity ID")
+            if known_entity_kinds is not None:
+                actual_kind = known_entity_kinds.get(target_id)
+                if actual_kind is None:
+                    raise EvaluatorError(
+                        f"{change_path}.target_id: unknown WorldSpec entity {target_id!r}"
+                    )
+                if actual_kind != target_kind:
+                    raise EvaluatorError(
+                        f"{change_path}.target_kind: expected {actual_kind!r} for "
+                        f"WorldSpec entity {target_id!r}"
+                    )
+
+        field = _nonempty_string(raw["field"], f"{change_path}.field")
+        if field not in contracts.PATCHABLE_FIELDS[target_kind]:
+            raise EvaluatorError(
+                f"{change_path}.field: {field!r} is not patchable for {target_kind!r}"
+            )
+        normalized.append(
+            {
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "field": field,
+                "instruction": _nonempty_string(
+                    raw["instruction"], f"{change_path}.instruction"
+                ),
+                "expected_effect": _nonempty_string(
+                    raw["expected_effect"], f"{change_path}.expected_effect"
+                ),
+            }
+        )
+    return normalized
 
 
 def _unit_score(value: Any, path: str) -> float:
@@ -328,12 +476,14 @@ def validate_visual_feedback(
         raise EvaluatorError("visual feedback.issues: at most 32 issues are allowed")
 
     known_ids: set[str] | None = None
+    known_entity_kinds: dict[str, str] | None = None
     if world_document is not None:
         try:
             world = contracts.validate_world(world_document)
         except contracts.ContractError as exc:
             raise EvaluatorError(f"current WorldSpec is invalid: {exc}") from exc
         known_ids = _known_entity_ids(world)
+        known_entity_kinds = _known_entity_kinds(world)
 
     issues: list[dict[str, Any]] = []
     seen_codes: set[str] = set()
@@ -348,6 +498,8 @@ def validate_visual_feedback(
             "camera_id",
             "message",
             "suggested_fix",
+            "domain",
+            "suggested_changes",
         }
         missing_issue = sorted(issue_keys - set(value))
         extra_issue = sorted(set(value) - issue_keys)
@@ -382,6 +534,11 @@ def validate_visual_feedback(
                 raise EvaluatorError(
                     f"{path}.camera_id: unknown evaluated camera {camera_id!r}"
                 )
+        domain = value["domain"]
+        if domain not in VISUAL_GUIDANCE_DOMAINS:
+            raise EvaluatorError(
+                f"{path}.domain: expected one of: {', '.join(VISUAL_GUIDANCE_DOMAINS)}"
+            )
         issues.append(
             {
                 "code": code,
@@ -391,6 +548,13 @@ def validate_visual_feedback(
                 "message": _nonempty_string(value["message"], f"{path}.message"),
                 "suggested_fix": _nonempty_string(
                     value["suggested_fix"], f"{path}.suggested_fix"
+                ),
+                "domain": domain,
+                "suggested_changes": _normalize_suggested_changes(
+                    value["suggested_changes"],
+                    f"{path}.suggested_changes",
+                    domain=domain,
+                    known_entity_kinds=known_entity_kinds,
                 ),
             }
         )
@@ -606,15 +770,22 @@ class VisualEvaluationAgent:
                 image_paths=[*references, *screenshots],
             )
         except ProviderError as exc:
-            raise EvaluatorError(f"VisualEvaluationAgent provider failed: {exc}") from exc
+            raise VisualEvaluationProviderError(
+                "VisualEvaluationAgent provider failed"
+            ) from exc
         except (OSError, RuntimeError) as exc:
-            raise EvaluatorError(f"VisualEvaluationAgent provider failed: {exc}") from exc
-        return validate_visual_feedback(
-            response,
-            world,
-            min_scene_similarity=self.min_scene_similarity,
-            expected_camera_ids=camera_ids,
-        )
+            raise VisualEvaluationProviderError(
+                "VisualEvaluationAgent provider failed"
+            ) from exc
+        try:
+            return validate_visual_feedback(
+                response,
+                world,
+                min_scene_similarity=self.min_scene_similarity,
+                expected_camera_ids=camera_ids,
+            )
+        except EvaluatorError as exc:
+            raise VisualFeedbackContractError(str(exc)) from exc
 
 
 class RepairAgent:
@@ -1019,7 +1190,11 @@ __all__ = [
     "VISUAL_EVALUATION_AGENT_NAME",
     "VISUAL_EVALUATION_AGENT_ROLE",
     "VISUAL_FEEDBACK_JSON_SCHEMA",
+    "VISUAL_GUIDANCE_DOMAINS",
     "VISUAL_ISSUE_JSON_SCHEMA",
+    "SUGGESTED_CHANGE_JSON_SCHEMA",
+    "VisualEvaluationProviderError",
+    "VisualFeedbackContractError",
     "VisualEvaluationAgent",
     "diff_to_patch",
     "evaluate_visual",

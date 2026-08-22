@@ -24,7 +24,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 try:  # Support package imports and direct local execution.
-    from . import agents, assets, contracts, evaluator, lifecycle, planner, refinement
+    from . import (
+        agents,
+        assets,
+        contracts,
+        evaluator,
+        lifecycle,
+        planner,
+        refinement,
+        repair,
+    )
     from .launcher import LogSink, PipelineCommands, PipelineState, run_launcher
 except ImportError:  # pragma: no cover - direct script execution only
     import agents
@@ -34,6 +43,7 @@ except ImportError:  # pragma: no cover - direct script execution only
     import lifecycle
     import planner
     import refinement
+    import repair
     from launcher import LogSink, PipelineCommands, PipelineState, run_launcher
 
 
@@ -58,6 +68,7 @@ DELIVERY_RESULT = "delivery"
 TIMING_RESULT = "timing_ms"
 
 DELIVERY_SCHEMA = "prompt-to-play/delivery@1"
+VISUAL_EVALUATION_ERROR_SCHEMA = "prompt-to-play/visual-evaluation-error@1"
 VISUAL_CHECK_ID = "visual_prompt_gate"
 REQUIRED_DELIVERY_CHECKS = frozenset(
     {
@@ -586,6 +597,8 @@ def _build_delivery_record(
     revision: int,
     mode: str,
     *,
+    visual_feedback: Mapping[str, Any] | None = None,
+    visual_evaluation_error: Mapping[str, Any] | None = None,
     correction_stop: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = evaluation["result"]
@@ -611,6 +624,16 @@ def _build_delivery_record(
         "score_gap": max(0.0, result["threshold"] - result["weighted_score"]),
         "failed_checks": failed_checks,
         "remaining_issues": copy.deepcopy(list(evaluation.get("issues", []))),
+        "visual_guidance": copy.deepcopy(
+            list(visual_feedback.get("issues", []))
+            if isinstance(visual_feedback, Mapping)
+            else []
+        ),
+        "visual_evaluation_error": (
+            copy.deepcopy(dict(visual_evaluation_error))
+            if visual_evaluation_error is not None
+            else None
+        ),
         "correction_stop": (
             copy.deepcopy(dict(correction_stop))
             if correction_stop is not None
@@ -1503,6 +1526,7 @@ class PipelineStages:
             project_dir, request_document["request_hash"]
         )
         correction_stop: dict[str, Any] | None = None
+        visual_evaluation_error: dict[str, Any] | None = None
 
         for revision in range(max_iterations + 1):
             iteration_started_utc = _utc_timestamp()
@@ -1523,26 +1547,67 @@ class PipelineStages:
             )
             _timings(state)["capture"] += _elapsed_ms(capture_started)
 
+            revision_dir = (
+                project_dir / "artifacts" / "runs" / run_id / f"rev_{revision}"
+            )
             evaluate_started = time.perf_counter()
             visual_agent = evaluator.VisualEvaluationAgent(
                 runtime.agent(agents.AgentRole.VISUAL_EVALUATOR),
                 project_root=project_dir,
             )
-            feedback = visual_agent.evaluate(
-                state.request.prompt,
-                world,
-                screenshots,
-                reference_image_paths=reference_image_paths,
-            )
-            _timings(state)["evaluate"] += _elapsed_ms(evaluate_started)
+            evaluation_failed = False
+            try:
+                feedback = visual_agent.evaluate(
+                    state.request.prompt,
+                    world,
+                    screenshots,
+                    reference_image_paths=reference_image_paths,
+                )
+            except (
+                evaluator.VisualEvaluationProviderError,
+                evaluator.VisualFeedbackContractError,
+            ) as exc:
+                evaluation_failed = True
+                feedback = {
+                    "accepted": False,
+                    "scene_similarity": 0.0,
+                    "issues": [],
+                }
+                contract_rejected = isinstance(
+                    exc, evaluator.VisualFeedbackContractError
+                )
+                visual_evaluation_error = {
+                    "schema": VISUAL_EVALUATION_ERROR_SCHEMA,
+                    "revision": revision,
+                    "status": "rejected" if contract_rejected else "failed",
+                    "error_type": type(exc).__name__,
+                    "screenshots": list(screenshot_relatives),
+                }
+                (revision_dir / "visual_evaluation_error.json").write_bytes(
+                    contracts.canonical_json_bytes(visual_evaluation_error) + b"\n"
+                )
+                correction_stop = {
+                    "after_revision": revision,
+                    "attempted_revision": revision,
+                    "reason": (
+                        "visual_evaluation_rejected"
+                        if contract_rejected
+                        else "visual_evaluation_unavailable"
+                    ),
+                    "message": (
+                        "Visual evaluation output did not satisfy the host contract."
+                        if contract_rejected
+                        else "Visual evaluation provider did not complete the call."
+                    ),
+                }
+            finally:
+                _timings(state)["evaluate"] += _elapsed_ms(evaluate_started)
 
-            revision_dir = (
-                project_dir / "artifacts" / "runs" / run_id / f"rev_{revision}"
-            )
-            feedback_path = revision_dir / "visual_feedback.json"
-            feedback_path.write_bytes(
-                contracts.canonical_json_bytes(feedback) + b"\n"
-            )
+            if not evaluation_failed:
+                feedback_path = revision_dir / "visual_feedback.json"
+                feedback_path.write_bytes(
+                    contracts.canonical_json_bytes(feedback) + b"\n"
+                )
             usage = runtime.aggregate_usage()
             report = _build_evaluation_report(
                 run_id=run_id,
@@ -1564,46 +1629,63 @@ class PipelineStages:
             )
             evaluations.append((f"rev_{revision}/evaluation.json", report))
             evaluation_worlds[revision] = copy.deepcopy(world)
-            log(
-                f"VisualEvaluationAgent：修订 {revision} 相似度 "
-                f"{feedback['scene_similarity']:.2f}，"
-                f"{'接受' if feedback['accepted'] else '需要修正'}"
-            )
+            if evaluation_failed:
+                if visual_evaluation_error["status"] == "rejected":
+                    failure_summary = "输出未通过宿主契约"
+                else:
+                    failure_summary = "Provider 调用未完成"
+                log(
+                    f"VisualEvaluationAgent：修订 {revision} {failure_summary}；"
+                    "保留已评测修订并停止迭代"
+                )
+            else:
+                log(
+                    f"VisualEvaluationAgent：修订 {revision} 相似度 "
+                    f"{feedback['scene_similarity']:.2f}，"
+                    f"{'接受' if feedback['accepted'] else '需要修正'}"
+                )
             runtime.write_trace(
                 project_dir / "artifacts" / "runs" / run_id / "agent_trace.json",
                 run_id=run_id,
             )
 
-            if report["next_action"] != "patch":
+            if evaluation_failed or report["next_action"] != "patch":
                 break
 
             repair_started = time.perf_counter()
-            repair_agent = evaluator.RepairAgent(
-                runtime.agent(agents.AgentRole.REPAIR),
+            repair_run = repair.repair_world(
+                runtime,
+                state.request.prompt,
+                world,
+                feedback,
+                screenshots,
+                iteration=revision + 1,
+                reference_image_paths=reference_image_paths,
+                structural_report=structural,
                 project_root=project_dir,
+                max_workers=repair.repair_max_workers(self.environment),
             )
-            try:
-                revised, patch = repair_agent.repair(
-                    state.request.prompt,
-                    world,
-                    feedback,
-                    screenshots,
-                    iteration=revision + 1,
-                    reference_image_paths=reference_image_paths,
-                    structural_report=structural,
-                )
-            except evaluator.EvaluatorError as exc:
-                _timings(state)["evaluate"] += _elapsed_ms(repair_started)
+            _timings(state)["evaluate"] += _elapsed_ms(repair_started)
+            repair_record_path = (
+                revision_dir / f"repair_to_rev_{revision + 1}.json"
+            )
+            repair_record_path.write_bytes(
+                contracts.canonical_json_bytes(repair_run.record) + b"\n"
+            )
+            statuses = ", ".join(
+                f"{task['task_id']}={task['status']}"
+                for task in repair_run.record["tasks"]
+            )
+            log(f"Repair Orchestrator：Subagent 完成（{statuses}）")
+            if repair_run.patch is None:
                 correction_stop = {
                     "after_revision": revision,
                     "attempted_revision": revision + 1,
-                    "reason": "repair_rejected",
-                    "message": " ".join(str(exc).split())[:1000],
+                    "reason": "repair_subagents_stalled",
+                    "message": (
+                        "No host-validated Repair Subagent changes were available."
+                    ),
                 }
-                log(
-                    f"RepairAgent：修订 {revision + 1} 提案未通过校验；"
-                    f"保留已评测修订并停止迭代：{correction_stop['message']}"
-                )
                 runtime.write_trace(
                     project_dir
                     / "artifacts"
@@ -1612,8 +1694,13 @@ class PipelineStages:
                     / "agent_trace.json",
                     run_id=run_id,
                 )
+                log(
+                    f"Repair Orchestrator：修订 {revision + 1} 无有效合并补丁；"
+                    "保留已评测修订并停止迭代"
+                )
                 break
-            _timings(state)["evaluate"] += _elapsed_ms(repair_started)
+            revised = repair_run.world
+            patch = repair_run.patch
             patch_path = revision_dir / f"patch_to_rev_{revision + 1}.json"
             patch_path.write_bytes(contracts.canonical_json_bytes(patch) + b"\n")
             world = revised
@@ -1628,7 +1715,7 @@ class PipelineStages:
                 log,
             )
             state.set_result(WORLD_RESULT, copy.deepcopy(world))
-            log(f"RepairAgent：已生成并应用修订 {revision + 1}")
+            log(f"Repair Orchestrator：已合并并应用修订 {revision + 1}")
 
         selection = lifecycle.select_best_revision(evaluations)
         selection_path = (
@@ -1674,10 +1761,20 @@ class PipelineStages:
             project_dir / "artifacts" / "runs" / run_id / "agent_trace.json",
             run_id=run_id,
         )
+        selected_feedback_path = selected_dir / "visual_feedback.json"
         delivery = _build_delivery_record(
             selected_evaluation,
             selected_revision,
             delivery_mode,
+            visual_feedback=(
+                _read_json_object(
+                    selected_feedback_path,
+                    "selected visual feedback",
+                )
+                if selected_feedback_path.is_file()
+                else None
+            ),
+            visual_evaluation_error=visual_evaluation_error,
             correction_stop=correction_stop,
         )
         delivery_path = selection_path.with_name("delivery.json")

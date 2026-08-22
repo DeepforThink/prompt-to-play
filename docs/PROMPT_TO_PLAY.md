@@ -43,14 +43,16 @@ Godot BuildExecutor (catalog assets first, primitive last fallback)
         v
 structural checks -> fixed-camera capture -> VisualEvaluationAgent
                                                |
-                                  per-camera observations
+                            observations + detailed guidance
                                                |
                                   host score and acceptance gate
                                      | pass              | fail
                                      v                   v
-                           best-revision selection   RepairAgent
+                           best-revision selection  Repair Subagents
+                                     |             /    |     \
+                                     |        layout gameplay light/camera
                                      |                   |
-                                     |        host derives PatchSpec
+                                     |       host validates and merges
                                      |                   |
                                      +<------ assets/build/capture
 ```
@@ -65,10 +67,15 @@ writes, and repeats until all workers return no change or the bounded iteration
 limit is reached. AssetAgent uses separate bounded workers for unique prefabs
 and writes one host-ordered asset manifest. The visual evaluator cannot edit the world or
 decide acceptance, Token, timing, or aggregate metrics. It scores every capture
-camera across the six visual dimensions; the host combines the mean and worst
-camera and derives `scene_similarity` and `accepted`. RepairAgent returns a complete
-candidate WorldSpec; the host validates it and deterministically derives only
-allowlisted stable-ID PatchSpec operations. A stale patch hash is rejected. The
+camera across the six visual dimensions and supplies detailed guidance with a
+repair domain, existing target kind/ID when available, patchable field,
+instruction, and expected visible effect. The host validates that guidance,
+combines the mean and worst camera, and derives `scene_similarity` and
+`accepted`. It then routes issues to fixed layout, gameplay, and lighting/camera
+Repair Subagents. Each returns a complete candidate WorldSpec but owns only its
+declared existing entity fields. The host derives PatchSpec operations, rejects
+invalid or unauthorized tasks independently, and deterministically merges the
+remaining siblings. A stale patch hash is rejected. The
 workflow keeps the best revision and permits at most two correction rounds
 after the initial build. A fully passing revision is preferred. When none
 passes, the highest-ranked revision that passes every non-visual hard check is
@@ -125,7 +132,8 @@ The six course metrics are represented directly:
 Each run retains its request, the Planner baseline, every refinement round and
 task outcome, every WorldSpec revision, asset catalog and rich
 asset manifest, build manifest, structural report, visual feedback, scored
-evaluation, patches, screenshots, best-revision selection, elapsed time, and
+evaluation, Repair Subagent round records, patches, screenshots,
+best-revision selection, elapsed time, and
 per-agent model/Token trace. `delivery.json` records whether the selected
 revision fully passed or is a structurally valid best-effort result. A
 good-looking screenshot cannot override a failed structural hard gate.

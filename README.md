@@ -15,7 +15,7 @@ The floating mechanical city in `prompt_to_play/examples/` is only one acceptanc
 - A Godot PrefabResolver that loads real `.glb`/`.gltf` scenes, enables shadows and collision, and records whether each entity used a catalog asset or fallback geometry.
 - WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
 - Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
-- An implemented screenshot feedback loop: VisualEvaluationAgent judges fixed-camera renders, RepairAgent returns a validated revision, the host derives a stable-ID PatchSpec, and the system performs at most two correction rounds before selecting the best revision.
+- An implemented screenshot feedback loop: VisualEvaluationAgent returns validated entity/field-level guidance, the host routes it to isolated layout, gameplay, and lighting/camera Repair Subagents, merges only owned stable-ID updates, and performs at most two correction rounds before selecting the best revision.
 - A cross-platform publisher and Python CI matrix for Windows and Linux.
 
 The host Agent performs prompt/reference interpretation and visual judgement. The repository supplies its runtime protocol, deterministic execution layer, contracts, evidence format, and correction guardrails. The scope is prompt-conditioned explorable 3D worlds, not arbitrary game genres or photorealistic reconstruction.
@@ -113,8 +113,8 @@ prompt + optional references
         -> Host repeatedly fans out bounded refinement tasks until convergence
         -> Execute deterministic Godot compiler
         -> Evaluate structure and fixed-camera evidence
-        -> Visual Agent emits per-camera observations
-        -> Host derives aggregate score, acceptance, and a validated repair patch
+        -> Visual Agent emits per-camera observations and entity/field guidance
+        -> Host scores, fans out three Repair Subagents, and merges valid patches
         -> Rebuild and select a passing or structurally valid best-effort revision
 ```
 
@@ -124,12 +124,16 @@ and convergence reason. `agent_trace.json` identifies every model call by role,
 instance, and task. Headless execution writes the build manifest and structural report to
 `artifacts/runs/<run-id>/rev_<n>/`. Capture mode visits every WorldSpec camera,
 rejects empty or near-uniform frames, writes PNGs, and records their SHA-256
-digests in `capture_manifest.json`. Set `PTP_REVISION` to `1` or `2` only after
-a validated feedback patch; earlier evidence remains untouched. A generated
+digests in `capture_manifest.json`. Each correction source revision records
+`repair_to_rev_<n>.json` with detailed visual guidance, task ownership/status,
+candidate and patch hashes, rejected tasks, and the merged patch. Set
+`PTP_REVISION` to `1` or `2` only after a validated merged patch; earlier
+evidence remains untouched. A generated
 project launches when the selected revision passes every structural delivery
 gate. A fully passing evaluation is preferred; otherwise `delivery.json` marks
 the highest-ranked structurally valid revision as `best_effort` and retains its
-visual failures, score gap, remaining issues, and correction-stop evidence.
+visual failures, score gap, detailed guidance, remaining issues, and
+correction-stop evidence.
 
 ## Contracts and tests
 
@@ -153,7 +157,8 @@ CPU-only execution is sufficient for contract validation, compilation, headless 
 - `prompt_to_play/planner.py` — arbitrary prompt/reference planning into a validated WorldSpec.
 - `prompt_to_play/refinement.py` — fixed refinement DAG, ownership enforcement, convergence, and iteration records.
 - `prompt_to_play/assets.py` — AssetAgent requests, paid API opt-in, content-addressed GLB cache, catalog, and manifest.
-- `prompt_to_play/evaluator.py` — VisualEvaluationAgent, RepairAgent, and deterministic WorldSpec-to-PatchSpec diff.
+- `prompt_to_play/evaluator.py` — VisualEvaluationAgent guidance contracts, bounded Repair worker, and deterministic WorldSpec-to-PatchSpec diff.
+- `prompt_to_play/repair.py` — fixed Repair Subagent fan-out, ownership validation, deterministic merge, and round evidence.
 - `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.
 - `prompt_to_play/pipeline.py` — concrete planning, publishing, build, structural-check, and launch stages.
 - `prompt_to_play/evaluation_policy.json` — internal evaluation configuration.
