@@ -2,190 +2,254 @@
 
 <div align="center">
 
-**Agent 驱动的 Godot 游戏生成与闭环评测流水线**
+**Agent-driven generation, evaluation, and repair of playable Godot games**
 
-从一段自然语言描述出发，自动生成、编译、试玩探针、截图评测、修复并选择最佳可玩 Godot 4 项目。
+Turn a natural-language game brief into an editable Godot project with automated build checks, interaction probes, visual evaluation, iterative repair, and evidence-backed revision selection.
 
 [![Tests](https://github.com/DeepforThink/prompt-to-play/actions/workflows/tests.yml/badge.svg)](https://github.com/DeepforThink/prompt-to-play/actions/workflows/tests.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Godot](https://img.shields.io/badge/Godot-4.7%20.NET-478CBF?logo=godot-engine&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE.md)
 
 </div>
 
-Prompt-to-Play 接收任意游戏 Prompt 和可选参考图，直接让模型编写真实的 Godot 场景、脚本、资源与着色器。系统不依赖 WorldSpec、固定实体表或场景模板，因此同一条流水线能够生成不同题材、视角、玩法和美术风格的游戏。
+## Overview
 
-生成不是一次性“写完即交付”。项目包含三个职责隔离的 Agent，以及由宿主程序控制的构建、结构验证、交互探针、截图评测、反馈修复和最佳版本恢复闭环。最终产物是一个可继续编辑、关闭后仍可重新打开的标准 Godot 项目。
+Prompt-to-Play accepts:
+
+1. a natural-language game description; and
+2. zero or more optional reference images.
+
+The model writes real Godot scenes, scripts, resources, and shaders under `generated/**`. There is no WorldSpec, fixed entity vocabulary, or genre-specific intermediate representation between the prompt and the generated project.
+
+Generation is followed by a host-controlled quality loop. Every candidate is validated, compiled, structurally inspected, interaction-tested, rendered, visually evaluated, and—when necessary—repaired by another model call. The final deliverable is a standard Godot project that can be reopened, edited, copied, and played without calling the model again.
 
 ## Demo Gallery
 
-> 点击封面播放仓库内的 MP4 演示。三款游戏均由同一个输入界面和同一套闭环流水线生成，未使用参考图。
+All three games below were produced by the same pipeline from text-only prompts. Click a cover to play the repository-hosted MP4.
 
-| 冰峰拉力：雪线竞速 | 云界远征：风晶之门 | 轨道拾荒者：核心撤离 |
+| Alpine Valley Rally | Skybound: Wind Crystal Expedition | Orbital Salvage: Core Extraction |
 | --- | --- | --- |
 | [![Alpine Valley Rally](media/demos/alpine-valley-rally.jpg)](media/demos/alpine-valley-rally.mp4) | [![Skybound](media/demos/skybound-wind-crystal-expedition.jpg)](media/demos/skybound-wind-crystal-expedition.mp4) | [![Orbital Salvage](media/demos/orbital-salvage-core-extraction.jpg)](media/demos/orbital-salvage-core-extraction.mp4) |
-| **Alpine Valley Rally**<br>雪山拉力、车辆惯性与漂移、顺序检查点 | **Skybound: Wind Crystal Expedition**<br>浮空岛平台跳跃、水晶收集与传送门 | **Orbital Salvage: Core Extraction**<br>等距视角搜集、脉冲战斗、冲刺与撤离 |
-| <code>WASD / 方向键</code> 驾驶，<code>R</code> 重开 | <code>WASD / 方向键</code> 移动，<code>Space</code> 跳跃 | <code>WASD / 方向键</code> 移动，<code>Space</code> 脉冲，<code>Shift</code> 冲刺 |
+| Snow rally driving with momentum, drifting, ordered checkpoints, and a timed lap. | Third-person floating-island platforming with crystals, checkpoints, hazards, and a final portal. | Isometric collection and combat with plasma pulses, shields, dash energy, and timed extraction. |
+| [View prompt](prompts/snow-rally-demo.txt) | [View prompt](prompts/skybound-demo.txt) | [View prompt](prompts/orbital-salvage-demo.txt) |
 
-完整 Prompt：
+## Features
 
-- [冰峰拉力：雪线竞速](prompts/snow-rally-demo.txt)
-- [云界远征：风晶之门](prompts/skybound-demo.txt)
-- [轨道拾荒者：核心撤离](prompts/orbital-salvage-demo.txt)
+- **Prompt-general game generation** — supports different genres, cameras, mechanics, objectives, layouts, and visual styles.
+- **Direct Godot authoring** — the model produces actual `.tscn`, GDScript, C#, resource, shader, JSON, and Markdown files instead of a fixed scene specification.
+- **Three isolated Agent roles** — project generation, visual evaluation, and evidence-guided code repair use separate model calls and structured contracts.
+- **Trusted runtime harness** — the repository owns the entry point, build configuration, structural checks, interaction probes, and screenshot capture.
+- **Automated correction loop** — compiler errors, scene failures, interaction failures, capture failures, and visual issues can all trigger a repair revision.
+- **Best-revision recovery** — immutable candidate snapshots allow the host to restore the strongest playable revision after a regression.
+- **Auditable evidence** — each revision records manifests, hashes, timings, Token usage, logs, screenshots, scores, and selection results.
+- **Persistent output** — closing the game does not delete the generated project.
+- **Provider compatibility** — supports OpenAI Responses-compatible endpoints through a masked local launcher.
 
 ## Architecture
 
-~~~mermaid
+```mermaid
 flowchart LR
-    U["Prompt + 可选参考图"] --> G["ProjectGeneratorAgent<br/>生成 generated/**"]
-    G --> S["安全契约<br/>路径 / 类型 / 大小 / 能力检查"]
-    S --> B["Godot + .NET 构建"]
-    B --> H["可信 Harness<br/>结构检查 + 交互探针 + 截图"]
-    H --> V["VisualEvaluationAgent<br/>视觉与玩法可读性评测"]
-    V -->|"全部门槛通过"| C["候选版本"]
-    V -->|"编译 / 结构 / 视觉问题"| R["CodeRepairAgent<br/>生成最小文件补丁"]
+    U["Prompt + optional references"] --> G["ProjectGeneratorAgent<br/>authors generated/**"]
+    G --> S["Safety contract<br/>paths, types, size, capabilities"]
+    S --> B["Godot + .NET build"]
+    B --> H["Trusted harness<br/>structure, interaction, capture"]
+    H --> V["VisualEvaluationAgent<br/>quality and readability"]
+    V -->|"all gates pass"| C["Accepted candidate"]
+    V -->|"evidence-backed issues"| R["CodeRepairAgent<br/>direct file patch"]
     R --> S
-    C --> K["Accepted-first 最佳版本选择"]
-    K --> P["可玩 Godot 项目<br/>+ 可审计运行证据"]
-~~~
+    C --> K["Accepted-first<br/>revision selection"]
+    K --> P["Playable Godot project<br/>+ immutable evidence"]
+```
 
-### 三个 Agent
+### Agent Roles
 
-| Agent | 输入 | 输出 | 职责 |
+| Agent | Inputs | Output | Responsibility |
 | --- | --- | --- | --- |
-| <code>ProjectGeneratorAgent</code> | 原始 Prompt、参考图 | 完整 <code>generated/**</code> 文件包 | 从零实现 Prompt 要求的场景、玩法、相机、UI 与视觉表现 |
-| <code>VisualEvaluationAgent</code> | 原始需求、参考图、实际截图 | 结构化评分与具体问题 | 独立评估需求符合度、构图、连贯性、细节、光照材质和玩法可读性 |
-| <code>CodeRepairAgent</code> | 当前源码、编译/结构/截图证据、评测反馈 | <code>generated/**</code> 文件补丁 | 修复编译、场景、交互和视觉问题，并进入下一次验证 |
+| `ProjectGeneratorAgent` | Prompt and optional reference images | Complete `generated/**` file package | Implements the requested scene, gameplay, camera, UI, and presentation |
+| `VisualEvaluationAgent` | Original request, references, and rendered captures | Structured scores and concrete issues | Evaluates prompt fidelity, composition, coherence, detail, lighting/materials, and gameplay readability |
+| `CodeRepairAgent` | Current source plus compiler, structural, interaction, capture, and visual evidence | Bounded `generated/**` patch | Repairs implementation and presentation defects before the next validation pass |
 
-三个角色使用隔离的模型调用与严格 JSON 契约。视觉 Agent 只提出证据和评分；最终是否通过由宿主程序根据固定质量门槛决定，模型不能自行宣布完成。
+The Agents do not decide whether a run succeeds. They produce files or evidence. Acceptance is derived by the trusted host from fixed build, structure, interaction, capture, and visual gates.
 
-### 自动闭环
+### Quality Loop
 
-每个候选修订都会经历：
+Each candidate revision passes through:
 
-1. 直接文件契约与静态安全检查；
-2. Godot/.NET 编译；
-3. 场景入口、玩家、目标、HUD、相机和可渲染内容检查；
-4. 合成按键输入并验证可观察的状态变化；
-5. 渲染一到两张绑定项目哈希的截图；
-6. 视觉 Agent 评测；
-7. 未通过时生成修复补丁并重新执行。
+1. direct-file schema and static safety validation;
+2. Godot/.NET compilation;
+3. entry-scene, player, objective, HUD, camera, and renderable-content checks;
+4. synthesized input with observable state-change verification;
+5. one or two captures bound to the exact project hash;
+6. structured visual evaluation;
+7. evidence-guided repair when any gate fails.
 
-默认最多进行 4 轮修订，内部硬上限为 6。所有历史版本和证据保持不可变；系统优先选择通过全部门槛的版本，否则保留最佳可玩版本供诊断，不会把未达标结果伪装成成功。
+The default configuration permits up to four repair revisions, with an internal hard ceiling of six. Accepted candidates always outrank rejected candidates. If no revision satisfies every gate, the best playable project and its evidence remain on disk for diagnosis, but the pipeline does not report it as a completed result.
 
-### 信任边界
+### Trust Boundary
 
-| 所有者 | 路径 | 责任 |
+| Owner | Paths | Responsibility |
 | --- | --- | --- |
-| 仓库宿主 | <code>project.godot</code>、<code>.csproj</code>、<code>harness/**</code> | 稳定入口、构建、结构验证、交互探针和截图 |
-| 模型 | <code>generated/**</code> | 当前 Prompt 对应的游戏内容 |
-| 证据写入器 | <code>artifacts/runs/&lt;run-id&gt;/rev_&lt;n&gt;/**</code> | 日志、清单、截图、评分、Token/时间与版本选择 |
-| 参考图发布器 | <code>references/**</code> | 按顺序复制并绑定哈希的用户参考图 |
+| Repository host | `project.godot`, `.csproj`, `harness/**` | Stable entry point, build settings, structural checks, interaction probes, and capture |
+| Model | `generated/**` | Prompt-specific game scene, logic, UI, resources, and shaders |
+| Evidence writer | `artifacts/runs/<run-id>/rev_<n>/**` | Immutable manifests, logs, reports, captures, traces, and selection data |
+| Reference publisher | `references/**` | Ordered, hashed copies of user-provided reference images |
 
-模型只能修改 <code>generated/**</code>。宿主会拒绝路径穿越、绝对路径、链接/联接、不支持的扩展名、超限文件，以及尝试进程执行、网络访问、宿主文件系统、环境变量、反射、原生互操作或不安全代码的生成内容。
+Before any model response changes the project, the host rejects path traversal, absolute paths, links or junctions, unsupported extensions, oversized packages, unsafe resource references, and generated code that attempts process execution, network access, host-filesystem access, environment access, reflection, native interop, or unsafe C#.
 
-更完整的协议与证据说明见 [docs/PROMPT_TO_PLAY.md](docs/PROMPT_TO_PLAY.md)。
+See [docs/PROMPT_TO_PLAY.md](docs/PROMPT_TO_PLAY.md) for the detailed protocol.
 
-## Quick Start
+## Getting Started
 
-### 环境要求
+### Prerequisites
 
-- Windows 10/11
-- Python 3.11+
+- Windows 10 or 11
+- Python 3.11 or newer
 - .NET 8 SDK
-- Godot 4.7.x .NET
-- OpenAI Responses 兼容接口的 API Key
+- Godot 4.7.x .NET/Mono edition
+- an API key for an OpenAI Responses-compatible endpoint
 
-运行时不依赖 Codex CLI。CPU 可以完成生成、编译和结构检查；独立 GPU 会改善渲染和视觉评测速度，但不是启动条件。
+The runtime does not require the Codex CLI. CPU-only systems can perform generation, compilation, and structural verification; a GPU improves rendering and visual-evaluation performance but is not required.
 
-### 1. 克隆项目
+### Installation
 
-~~~powershell
+```powershell
 git clone https://github.com/DeepforThink/prompt-to-play.git
 cd prompt-to-play
-~~~
+```
 
-### 2. 启动输入界面
+Verify the local toolchain:
 
-推荐使用带掩码输入的 Windows 启动器：
+```powershell
+python --version
+dotnet --version
+godot --version
+```
 
-~~~powershell
+If automatic discovery does not locate the intended executables, set process-local paths:
+
+```powershell
+$env:PTP_DOTNET_EXE = "C:\path\to\dotnet.exe"
+$env:PTP_GODOT_EXE = "C:\path\to\Godot_v4.7-stable_mono_win64.exe"
+```
+
+### Launch the Desktop Interface
+
+The recommended Windows entry point reads the API key through masked input:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
-~~~
+```
 
-默认配置为米醋 Responses 兼容端点和 <code>gpt-5.6-sol</code>。也可以使用：
+The default preset targets the Micu Responses-compatible endpoint with `gpt-5.6-sol`.
 
-~~~powershell
-# OpenAI 官方端点
+Other endpoint presets:
+
+```powershell
+# OpenAI
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider openai -Model <model-id>
 
-# 其他 Responses 兼容端点
+# Custom Responses-compatible endpoint
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider custom -BaseUrl https://example.com/v1 -Model <model-id>
-~~~
+```
 
-启动器只把 API Key 放入新进程的环境变量，并在启动后清除自身副本；不会把密钥写入源码、Git、日志或命令行参数。
+The launcher passes the key only through the child process environment and clears its own copy after startup. It does not write credentials to source files, Git, logs, or command-line arguments.
 
-### 3. 生成游戏
+### Generate a Game
 
-在桌面界面中输入游戏描述，可选添加参考图片，然后点击 **生成并启动**。Seed 由规范化请求内部派生；时间、Token、评分和哈希是运行后记录的评价指标，不是用户必须填写的参数。
+1. Enter a game description.
+2. Optionally add reference images.
+3. Select **Generate and Launch**.
+4. Follow progress in the run log.
+5. Play the selected project when the quality loop finishes.
 
-## Generated Projects
+Seed is derived internally from the canonical request. Time, Token usage, scores, and output hashes are recorded as evaluation results rather than exposed as required user inputs.
 
-每次请求都会创建独立目录：
+## Generated Output
 
-~~~text
+Every request creates a unique project directory outside the source repository:
+
+```text
 ../output/generated/<request-hash>/run-<id>/
 ├── project.godot
 ├── PromptToPlayDirect.csproj
-├── generated/                 # 最终选中的模型源码
-├── harness/                   # 可信验证宿主
-└── artifacts/runs/<run-id>/   # 每轮构建、截图、评分和选择证据
-~~~
+├── generated/                  # selected model-authored source
+├── harness/                    # trusted validation host
+├── references/                 # optional hashed reference copies
+└── artifacts/runs/<run-id>/
+    ├── request.json
+    ├── agent_trace.json
+    ├── selection.json
+    └── rev_<n>/
+        ├── build.log
+        ├── direct_status.json
+        ├── direct_structural_report.json
+        ├── direct_visual_feedback.json
+        ├── captures/
+        └── generated_snapshot.zip
+```
 
-关闭游戏不会删除项目。选中的项目可以直接用 Godot 再次打开、复制给队友或继续开发；只有生成或修复新游戏时才需要 API Key。
+Closing Godot does not remove the project. Open its `project.godot` again to play or edit it without another model call. An API key is required only when generating or repairing a different game.
 
 ## Evaluation Evidence
 
-| 评价指标 | 项目证据 |
+| Course metric | Evidence produced by Prompt-to-Play |
 | --- | --- |
-| 场景相似度 | Prompt/参考图与哈希截图的视觉 Agent 对比 |
-| 结构正确性 | 编译结果、入口/玩家/目标/HUD/相机检查与交互探针 |
-| 自动化闭环 | 初始文件包、逐轮补丁、评测、不可变快照和最终选择 |
-| 生成速度 | 规划、写入、构建、检查、截图、评测和修复的分阶段计时 |
-| Token 消耗 | 每个 Agent 的输入/输出 Token 与模型调用轨迹 |
-| 结果可复现性 | 规范化请求、内部 Seed、源码/截图哈希和重复运行对比 |
+| Scene similarity | Visual comparison between the prompt/references and hashed captures |
+| Structural correctness | Build result plus entry, gameplay, player, objective, HUD, camera, and interaction checks |
+| Automation loop | Initial file package, per-revision patch/evaluation, immutable snapshots, and final selection |
+| Generation speed | Stage-level timing for generation, publication, build, verification, capture, evaluation, repair, and restore |
+| Token efficiency | Per-Agent input/output Token counts and model-call traces |
+| Reproducibility | Canonical request, derived Seed, source/capture hashes, and repeated-run comparison |
+
+An attractive screenshot cannot override a failed build or interaction probe. Conversely, a compilable scene cannot pass if it fails visual quality or gameplay-readability requirements.
 
 ## Repository Layout
 
-- <code>prompt_to_play/direct_generation.py</code>：直接文件 Schema、路径/代码安全验证与原子补丁。
-- <code>prompt_to_play/direct_agents.py</code>：生成、视觉评测和代码修复三个 Agent。
-- <code>prompt_to_play/direct_evaluation.py</code>：视觉反馈契约与宿主质量门槛。
-- <code>prompt_to_play/direct_pipeline.py</code>：构建、验证、截图、修复、选择和启动编排。
-- <code>prompt_to_play/direct_template/</code>：可信 Godot Harness 与模型内容边界。
-- <code>prompt_to_play/launcher.py</code>：桌面 Prompt/参考图输入界面。
-- <code>scripts/start_prompt_to_play_api.ps1</code>：掩码 API 启动器。
-- <code>prompts/</code>：可复现实验 Prompt。
-- <code>media/demos/</code>：压缩后的演示视频与封面。
-- <code>tests/</code>：契约、安全、Agent、模板和流水线测试。
+| Path | Purpose |
+| --- | --- |
+| `prompt_to_play/direct_generation.py` | Direct-file schema, path/content safety checks, and atomic patch application |
+| `prompt_to_play/direct_agents.py` | Project generation, visual evaluation, and code repair Agents |
+| `prompt_to_play/direct_evaluation.py` | Visual feedback contract and host-owned quality gate |
+| `prompt_to_play/direct_pipeline.py` | Generation, build, verification, capture, repair, selection, and launch orchestration |
+| `prompt_to_play/direct_template/` | Trusted Godot host and generated-content boundary |
+| `prompt_to_play/launcher.py` | Responsive desktop input and run-progress interface |
+| `scripts/start_prompt_to_play_api.ps1` | Masked provider launcher |
+| `prompts/` | Reproducible demonstration prompts |
+| `media/demos/` | Curated showcase videos and poster images |
+| `tests/` | Contract, safety, Agent, template, launcher, and pipeline tests |
 
-旧的 Schema/WorldSpec 实验模块仅作为历史实现参考，不被当前直接生成入口导入。
+Older schema-driven, multi-engine, publishing, and asset-generation modules are retained as upstream or implementation history. They are not used by the supported direct-generation entry point.
 
 ## Development
 
-~~~powershell
+Run the test and static-analysis suite:
+
+```powershell
 python -m pytest -q
 python -m compileall -q prompt_to_play scripts tests
-~~~
+ruff check prompt_to_play scripts tests
+```
 
-提交前请确认：
+Before committing:
 
-- 没有 API Key、<code>.env</code>、个人路径或私有参考图；
-- 没有 <code>output/</code>、<code>.godot/</code>、构建目录、缓存或运行证据；
-- 演示媒体已经压缩，原始录屏保留在仓库外；
-- README 中的演示链接和 Prompt 可以复现。
+- keep API keys, `.env` files, personal paths, and private references out of Git;
+- do not commit `output/`, `.godot/`, run artifacts, caches, local toolchains, or build products;
+- keep original recordings outside the repository and add only compressed showcase media;
+- verify that README links, demonstration prompts, and videos remain valid.
 
-## Upstream and License
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
-本项目基于 [Godogen](https://github.com/htdt/godogen) 的开放源码工作继续开发，并将核心运行路径扩展为面向任意 Prompt 的 Godot 直接生成、多 Agent 评测修复和证据化版本选择流水线。
+## Limitations
 
-项目遵循 [MIT License](LICENSE.md)。上游作者及许可证信息保留在仓库历史与许可证文件中。
+- The supported convenience launcher currently targets Windows.
+- Output quality and determinism depend on the selected model and provider.
+- Static code validation is a conservative safety boundary, not a replacement for an OS-level sandbox in production.
+- Generated projects target Godot 4.7.x and may require migration for later engine versions.
+- Exact source or pixel-level reproducibility is not guaranteed with nondeterministic providers; the pipeline records measured variation instead.
+
+## Acknowledgements and License
+
+Prompt-to-Play is built on the open-source work of [Godogen](https://github.com/htdt/godogen). This repository extends that foundation with direct arbitrary-prompt Godot generation, isolated generation/evaluation/repair Agents, trusted interaction and visual gates, immutable revision evidence, and best-candidate restoration.
+
+Released under the [MIT License](LICENSE.md). Upstream attribution and license history are preserved.
