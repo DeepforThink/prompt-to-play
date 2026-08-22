@@ -660,6 +660,7 @@ public partial class WorldRuntime : Node3D
                 seed,
                 _primaryColor,
                 _accentColor,
+                _groundColor,
                 _emissiveColor,
                 out string codeFailure))
         {
@@ -1002,6 +1003,7 @@ public partial class WorldRuntime : Node3D
                 seed,
                 _primaryColor,
                 _accentColor,
+                _groundColor,
                 _emissiveColor,
                 out string codeFailure);
             if (codeGenerated)

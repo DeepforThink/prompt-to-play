@@ -24,7 +24,7 @@ distinct Godot 4.7 C# geometry for the supplied WorldSpec entities. Return JSON
 only. Emit exactly one `case "stable_id":` for every requested entity ID and
 finish each case with `return true;`. The body runs inside a method with these
 variables: stableId, prefab, root (Node3D), scale (Vector3), seed (uint),
-primary/accent/emissive (Color). Use only Godot node, mesh, shape, material,
+primary/accent/ground/emissive (Color). Use only Godot node, mesh, shape, material,
 Vector3, Color, Mathf, RandomNumberGenerator, and PromptToPlay.PrimitiveFactory
 APIs. Add useful collision bodies for solid objects. Do not read files, load
 resources, use networking, processes, reflection, environment variables,
@@ -121,6 +121,7 @@ public static class GeneratedCodeObjects
         uint seed,
         Color primary,
         Color accent,
+        Color ground,
         Color emissive,
         out string failure)
     {{

@@ -12,6 +12,7 @@ public static class GeneratedCodeObjects
         uint seed,
         Color primary,
         Color accent,
+        Color ground,
         Color emissive,
         out string failure)
     {

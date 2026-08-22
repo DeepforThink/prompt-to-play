@@ -100,6 +100,7 @@ class GodotTemplateTests(unittest.TestCase):
             self.runtime.index("_prefabResolver.TryInstantiate("),
         )
         self.assertIn("return false;", self.generated_objects)
+        self.assertIn("Color ground", self.generated_objects)
 
     def test_interactables_try_catalog_assets_before_glow_primitive(self):
         start = self.runtime.index("private void BuildInteractables()")
