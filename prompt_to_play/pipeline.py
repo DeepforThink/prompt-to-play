@@ -1331,6 +1331,11 @@ class PipelineStages:
         build_environment = self._revision_environment(
             toolchain, self.environment, run_id, 0
         )
+        # NuGet machine-wide configs can retain a removed Visual Studio fallback
+        # path. Point the resolver at the verified Godot feed for this build only.
+        build_environment["NUGET_FALLBACK_PACKAGES"] = os.fspath(
+            toolchain.godot_nupkgs
+        )
         for command in (
             (
                 os.fspath(toolchain.dotnet_exe),

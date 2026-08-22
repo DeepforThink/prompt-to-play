@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import agents, contracts, evaluator, planner
+from .provider import ProviderError
 
 
 REFINEMENT_SCHEMA = "prompt-to-play/refinement@1"
@@ -135,7 +136,10 @@ def _bounded_reason(exc: Exception) -> str:
 
 
 def _safe_worker_rejection_reason(exc: Exception) -> str:
-    if isinstance(exc, (evaluator.EvaluatorError, contracts.ContractError, ValueError)):
+    if isinstance(
+        exc,
+        (ProviderError, evaluator.EvaluatorError, contracts.ContractError, ValueError),
+    ):
         return _bounded_reason(exc)
     return "subagent execution failed"
 

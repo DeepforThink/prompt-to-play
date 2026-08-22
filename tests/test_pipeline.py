@@ -353,7 +353,11 @@ class PipelineStageTests(unittest.TestCase):
                 pipeline.PipelineDependencies(
                     source_repo_root=source_repo,
                     output_root=output_root,
-                    environment={"PTP_CAPTURE": "1", "OPENAI_API_KEY": "must-not-leak"},
+                    environment={
+                        "PTP_CAPTURE": "1",
+                        "OPENAI_API_KEY": "must-not-leak",
+                        "NUGET_FALLBACK_PACKAGES": "must-not-control-build",
+                    },
                     run_command=fake_run,
                     which=lambda _name: None,
                 )
@@ -382,6 +386,11 @@ class PipelineStageTests(unittest.TestCase):
                 )
                 self.assertNotIn("PTP_CAPTURE", environment)
                 self.assertNotIn("OPENAI_API_KEY", environment)
+            for _argv, _cwd, environment in calls[:2]:
+                self.assertEqual(
+                    environment["NUGET_FALLBACK_PACKAGES"], str(feed.resolve())
+                )
+            self.assertNotIn("NUGET_FALLBACK_PACKAGES", calls[2][2])
             self.assertEqual(
                 state.require_result(pipeline.TOOLCHAIN_RESULT),
                 pipeline.Toolchain(
