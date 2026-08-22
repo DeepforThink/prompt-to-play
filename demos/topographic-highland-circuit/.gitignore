@@ -1,0 +1,8 @@
+.godot/
+.mono/
+bin/
+obj/
+artifacts/
+*.import
+*.log
+

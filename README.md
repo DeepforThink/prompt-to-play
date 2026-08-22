@@ -83,6 +83,15 @@ Token use, thresholds, and correction limits are not fields in this launcher:
 the seed is derived internally, while time and Token use remain evaluation
 outputs.
 
+### Editable generated game
+
+The repository includes one clean development snapshot at
+`demos/topographic-highland-circuit/`. It is a complete editable Godot .NET
+project containing the selected WorldSpec, scene, runtime scripts, and asset
+catalog, without generated caches, API credentials, Agent logs, or discarded
+revisions. Teammates can open its `project.godot` directly without an API key;
+an API key is needed only to generate another game from a new prompt.
+
 ### Publish for a host Agent
 
 Publish a Codex-ready Godot project:
