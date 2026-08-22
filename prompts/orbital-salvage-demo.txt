@@ -1,0 +1,9 @@
+Create a polished, fully playable 3D isometric sci-fi salvage game set inside a derelict orbital station above a glowing blue planet.
+
+The player controls a compact orange repair drone using WASD or the arrow keys. Space fires a short-range plasma pulse, Shift performs a rechargeable dash, and R restarts the game. Recover five glowing reactor cores in any order, then carry them to the extraction beacon before the 100-second timer expires.
+
+Include three security drones that patrol and chase the player. Plasma pulses temporarily disable them. The player has three shield points; enemy attacks and environmental hazards remove shield points. Reaching zero shield or running out of time causes a clear loss state, while delivering all five cores produces a satisfying win sequence.
+
+Build a visually rich orbital station with connected platforms, damaged corridors, rotating machinery, large windows overlooking the planet, drifting debris, sparks, emergency lights, fog and neon glow. Add clear collision, responsive movement, readable objectives, a smooth isometric follow camera, sound-like visual feedback, particles, and a polished HUD showing cores, shields, dash energy and remaining time.
+
+Use procedural low-poly geometry and Godot materials so the game requires no external asset downloads. Make the result presentation-ready, immediately playable, and visually understandable from the first frame.

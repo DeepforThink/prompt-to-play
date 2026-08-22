@@ -1,0 +1,9 @@
+Create a polished, fully playable 3D third-person platform adventure set on floating islands above a golden sunset cloud sea.
+
+The player controls a small explorer robot using WASD or the arrow keys, with Space to jump. Collect five glowing wind crystals in any order, then enter the ancient sky portal before a 120-second timer expires. Falling from an island must respawn the player at the latest safe checkpoint without losing collected crystals. Include moving platforms, suspended bridges, jump pads, rotating hazards, clear collision, and complete win, lose, and restart states.
+
+Use a smooth elevated follow camera that keeps the next platform visible. Show collected crystals, remaining time, controls, and objective status in a clean HUD.
+
+Build several visually distinct floating islands with grass, cliffs, waterfalls disappearing into clouds, ruins, wind turbines, trees, banners, birds, and layered distant islands. Use a cohesive stylised low-poly art direction with warm sunset lighting, volumetric-looking clouds, atmospheric depth, shadows, glowing crystals, portal particles, and strong foreground/midground/background composition.
+
+The result must look like a presentation-ready game rather than a grey-box prototype. Provide two attractive capture cameras that clearly communicate the platforming gameplay, floating-island scale, player character, crystals, and final portal.

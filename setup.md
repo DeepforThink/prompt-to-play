@@ -1,144 +1,66 @@
-# Workstation Setup
+# Prompt-to-Play Workstation Setup
 
-Shared workstation setup for the consolidated Godogen source repo.
+The supported presentation workflow targets Windows and Godot 4.7 .NET. The desktop launcher accepts a Prompt and optional reference images, calls a Responses-compatible model endpoint, builds the generated project, runs structural and interaction checks, captures evaluation images, and launches the selected game.
 
-## .NET 9 SDK
+## Required Software
 
-Godot 4.5+ requires .NET 9.
+- Python 3.11 or newer
+- .NET 8 SDK
+- Godot 4.7.x .NET/Mono edition
+- PowerShell 5.1 or newer
+- Git
 
-### Linux (Ubuntu/Debian)
+The standard non-.NET Godot build cannot load the trusted C# harness. Install the .NET/Mono distribution even when a generated game uses GDScript.
 
-```bash
-wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh
-chmod +x /tmp/dotnet-install.sh
-/tmp/dotnet-install.sh --channel 9.0 --install-dir ~/.dotnet
-```
+## Verify the Toolchain
 
-Add to `~/.bashrc`:
+~~~powershell
+python --version
+dotnet --version
+godot --version
+~~~
 
-```bash
-export PATH="$HOME/.dotnet:$PATH"
-export DOTNET_ROOT="$HOME/.dotnet"
-```
+Expected major versions are Python 3.11+, .NET 8, and Godot 4.7.x with <code>mono</code> in the version or package name.
 
-### macOS
+Prompt-to-Play checks explicit configuration first, then workspace-local <code>.tools/</code> directories, and finally <code>PATH</code>. If automatic discovery does not find the correct executables, set process-local paths before launching:
 
-```bash
-brew install dotnet@9
-```
+~~~powershell
+$env:PTP_DOTNET_EXE = "C:\path\to\dotnet.exe"
+$env:PTP_GODOT_EXE = "C:\path\to\Godot_v4.7-stable_mono_win64.exe"
+~~~
 
-## Rust
+Do not commit personal absolute paths.
 
-Bevy projects require a current Rust toolchain:
+## Start the Desktop Interface
 
-```bash
-rustup update stable
-cargo --version
-rustc --version
-```
+From the repository root:
 
-## Node.js And Browser
+~~~powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
+~~~
 
-Babylon.js projects require Node.js 22.12+ and npm:
+The default preset uses the Micu Responses-compatible endpoint and <code>gpt-5.6-sol</code>. The launcher asks for the API Key using masked input and passes it only to the child process.
 
-```bash
-node --version
-npm --version
-```
+Other endpoints:
 
-Browser capture requires Chrome or Chromium with hardware WebGL2. Install one system browser and set `CHROME_BIN` if it is not on a common path:
+~~~powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider openai -Model <model-id>
+powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider custom -BaseUrl https://example.com/v1 -Model <model-id>
+~~~
 
-```bash
-command -v google-chrome || command -v chromium || command -v chromium-browser
-export CHROME_BIN=/path/to/chrome
-```
+## Security
 
-Babylon capture prefers hardware WebGL2. A fallback to a software renderer (SwiftShader, llvmpipe, lavapipe, etc.) on a GPU-equipped host means the browser GPU path is misconfigured and worth fixing; on a GPU-less host it still captures, at reduced quality and speed.
+- Never place an API Key in source code, README examples, command-line arguments, committed environment files, screenshots, or issue text.
+- Prefer the masked launcher. It clears its local key copy after starting the desktop process.
+- Generated projects and evaluation evidence are written below <code>../output/generated/</code> and are ignored by Git.
+- Rotate any key that has been exposed in chat, terminal history, logs, or screen recordings.
 
-## System Packages
+## Development Checks
 
-```bash
-sudo apt-get install vulkan-tools xvfb ffmpeg imagemagick
-```
+~~~powershell
+python -m pytest -q
+python -m compileall -q prompt_to_play scripts tests
+ruff check prompt_to_play scripts tests
+~~~
 
-- **vulkan-tools** — `vulkaninfo` for GPU validation
-- **xvfb** — virtual X11 display for headless Godot/Bevy runs and capture
-- **ffmpeg** — MP4 encoding of proof videos and sprite frame extraction
-- **imagemagick** — image resize, flip, crop for sprite pipelines
-
-On macOS:
-
-```bash
-brew install coreutils ffmpeg dotnet@9
-```
-
-## Python
-
-Requires Python 3.10+.
-
-```bash
-python3 --version
-pip install -r asset-gen/tools/requirements.txt
-pip install google-genai
-```
-
-In a published game repo, the same asset-generation requirements file lives at:
-
-- `.claude/skills/asset-gen/tools/requirements.txt` for Claude Code
-- `.agents/skills/asset-gen/tools/requirements.txt` for Codex
-
-`google-genai` is required by `asset_gen.py` for Gemini image generation.
-
-## Godot (.NET edition)
-
-The **.NET edition** is required for Godot projects. The standard Godot build cannot run C# scripts.
-
-### Linux
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/godotengine/godot/releases/latest | grep -oP '"tag_name": "\K[^"]+' | sed 's/-stable//')
-echo "Installing Godot .NET $VERSION"
-cd /tmp
-wget https://github.com/godotengine/godot/releases/download/${VERSION}-stable/Godot_v${VERSION}-stable_mono_linux_x86_64.zip
-unzip Godot_v${VERSION}-stable_mono_linux_x86_64.zip
-sudo mv Godot_v${VERSION}-stable_mono_linux_x86_64/Godot_v${VERSION}-stable_mono_linux.x86_64 /usr/local/bin/godot
-sudo mv Godot_v${VERSION}-stable_mono_linux_x86_64/GodotSharp /usr/local/bin/GodotSharp
-```
-
-`GodotSharp/` must live next to the `godot` binary. Godot resolves it relative to itself.
-
-### macOS
-
-```bash
-brew install --cask godot-mono
-sudo ln -sf /Applications/Godot_mono.app/Contents/MacOS/Godot /usr/local/bin/godot
-```
-
-### Verify
-
-```bash
-dotnet --version                 # 9.0.x
-godot --version                  # 4.x.x.stable.mono
-godot --headless --quit          # may show harmless RID warnings
-```
-
-If `godot --headless --quit` crashes with assembly errors, check that `GodotSharp/` is next to the binary:
-
-```bash
-ls "$(dirname "$(which godot)")"/GodotSharp/
-```
-
-## API Keys
-
-Set in environment:
-
-- `GOOGLE_API_KEY` — Gemini image generation
-- `XAI_API_KEY` — xAI Grok image/video generation
-- `TRIPO3D_API_KEY` — image-to-3D conversion
-
-## Verify Rendering
-
-```bash
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json vulkaninfo --summary 2>&1 | grep "deviceName"
-xvfb-run -a godot --headless --quit
-```
+The runtime does not require Codex CLI, Rust, Node.js, Babylon.js, Bevy, Gemini asset generation, or Tripo3D. Those components belong to upstream or historical experiments rather than the supported direct Godot pipeline.

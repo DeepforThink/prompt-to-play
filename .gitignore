@@ -3,13 +3,42 @@
 .codex/
 .playwright-cli/
 .playwright
-**/__pycache__
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials*.json
+api_key*
+
+# Python and test caches
+**/__pycache__/
+*.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Build and runtime output
 **/.godot/
 **/artifacts/
 **/bin/
 **/obj/
+build/
+dist/
 output/
+*.log
+*.tmp
+*.bak
+
+# Local tools and generated API references
 godot/skills/godot-api/doc_api/
 godot/skills/godot-api/doc_source/
+
+# OS metadata
+.DS_Store
+Thumbs.db

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-22 — Prompt-to-Play direct generation
+
+- Added a desktop Prompt and optional-reference input flow that produces complete Godot projects without WorldSpec or a fixed scene vocabulary.
+- Added isolated ProjectGenerator, VisualEvaluation, and CodeRepair Agent roles with strict structured contracts.
+- Added host-owned path/content safety checks, .NET build validation, trusted structural and interaction probes, rendered captures, visual quality gates, immutable revision evidence, and accepted-first best-version restoration.
+- Added a masked Responses-compatible API launcher, persistent generated projects, replay without another API call, and direct support for GDScript or C# below the model-owned boundary.
+- Added three tested showcase games with reproducible Prompts and compressed demonstration videos.
+
+## Upstream Godogen history
+
 **2026-07-02 — Docs-only runtime**
 - Replaced the multi-stage skill pipeline with a thin runtime: a single engine-agnostic manifest (`prompts/runtime.md`), a one-page per-engine guide, and the cross-engine `asset-gen` skill. The model plans, scaffolds, and decomposes the work itself.
 - One runtime manifest covers delivery. The agent reads how the task is framed in-run: an open-ended direction gets the live game early and checkpoints at taste/scope/cost decisions; a finished brief runs on reasonable calls and closes with a 15–20s proof recording, watched back before done. Run/show/capture mechanics live in the engine guides and serve both paths.

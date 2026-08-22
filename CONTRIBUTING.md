@@ -1,65 +1,51 @@
-# Contributing to Godogen
+# Contributing to Prompt-to-Play
 
-## Philosophy
+Prompt-to-Play turns an arbitrary natural-language game request and optional reference images into an editable Godot project, then proves and improves the result through an evidence-backed correction loop.
 
-Godogen is an autonomous pipeline. The goal is to generate the best possible games with as little human guidance as possible. Every piece of this repo exists to serve that goal.
+## Project Priorities
 
-We keep things lean and focused. We don't add features just to have them — we'd rather have one clear, well-built tool than several mediocre ones. Less surface area means easier maintenance and better agent efficiency. If a new feature doesn't make the pipeline meaningfully better at producing games autonomously, it doesn't belong here.
+Contributions should improve at least one of:
 
-## How to Contribute
+- prompt generality across different genres, cameras, mechanics, and art directions;
+- build, scene, interaction, capture, or visual reliability;
+- measurable output quality;
+- Token, latency, or API cost efficiency without hiding quality regressions;
+- safety of the model-writable <code>generated/**</code> boundary;
+- reproducibility and clarity of per-revision evidence.
 
-### Step 1: Open an Issue First
+Avoid fixed WorldSpec vocabularies, scene-specific shortcuts, or changes that let a model bypass host-owned acceptance gates.
 
-**All contributions start with an issue. Do not open a PR without an approved issue.**
+## Before Opening a Pull Request
 
-In your issue, explain:
+Open an issue for substantial architecture, contract, provider, or workflow changes. Include:
 
-- **What** you want to change or add.
-- **Why** — how does this improve the autonomous pipeline? What concrete problem does it solve? Show evidence if you can (failed generations, error logs, before/after comparisons).
-- **Why not something simpler** — if there's a lighter-weight way to achieve the same result, explain why your approach is better.
+- the problem and a minimal reproduction;
+- current compiler, structural, capture, or visual evidence;
+- the proposed behavior;
+- expected effects on quality, latency, Token use, and compatibility.
 
-Wait for maintainer approval before writing code. This saves everyone's time — yours included.
+Small documentation and narrowly scoped bug fixes can go directly to a pull request.
 
-### Step 2: Get Approval
+## Development Requirements
 
-A maintainer will respond to your issue. Possible outcomes:
+Run:
 
-- **Approved** — go ahead and implement.
-- **Needs discussion** — the idea has merit but the approach needs refinement.
-- **Closed** — doesn't fit the project direction. This isn't personal; the bar is high because scope discipline is how this project stays healthy.
+~~~powershell
+python -m pytest -q
+python -m compileall -q prompt_to_play scripts tests
+ruff check prompt_to_play scripts tests
+~~~
 
-### Step 3: Open a PR
+Changes to the direct-file contract, Agent prompts, evaluation gate, trusted template, launcher, or selection logic should include focused tests. Pipeline changes should also include an end-to-end result or sanitized evidence summary.
 
-Once approved, open a PR that references the issue. Keep it focused on what was discussed — avoid scope creep.
+## Security and Repository Hygiene
 
-## What We're Looking For
+- Never commit API keys, <code>.env</code> files, personal paths, private reference images, generated projects, or run artifacts.
+- Keep model writes below <code>generated/**</code>; do not expand capabilities without explicit tests and threat analysis.
+- Use the masked launcher for credentials.
+- Add only compressed, curated showcase media to <code>media/demos/</code>; retain original recordings outside Git.
+- Preserve upstream attribution and the MIT license.
 
-**Good contributions** typically:
+## Pull Request Scope
 
-- Fix a bug that causes generation failures or degraded output.
-- Improve output quality in a measurable way (better scenes, fewer broken scripts, more reliable asset generation).
-- Reduce token usage or API costs without sacrificing quality.
-- Improve reliability of the pipeline (fewer crashes, better error recovery).
-- Improve or correct the Godot, Bevy, or asset-generation reference material.
-
-**We'll likely close contributions that:**
-
-- Add features the pipeline doesn't need to function.
-- Introduce alternative approaches when the existing one works fine.
-- Add configuration options for things that should have good defaults.
-- Are large refactors without a demonstrated problem they solve.
-- Touch many files with cosmetic or stylistic changes.
-
-## Code Expectations
-
-- Match the existing style and conventions in the repo.
-- Keep changes minimal and surgical. Small, focused PRs are easier to review and merge.
-- If your change touches a skill, test it by running the pipeline end-to-end and include the output or a summary of results.
-
-## PRs Without an Approved Issue Will Be Closed
-
-This isn't to be unwelcoming — it's to protect both maintainer time and contributor effort. The worst outcome is someone spending hours on a PR that was never going to be merged. The issue-first process prevents that.
-
-## Bug Reports and Questions
-
-Bug reports don't need prior approval — just open an issue with reproduction steps. Questions and discussions are welcome in issues too.
+Keep changes focused and explain how they improve the supported direct Godot pipeline. Historical Godogen publishing, Bevy, Babylon.js, and asset-generation code remains for reference; do not refactor it incidentally when changing Prompt-to-Play.

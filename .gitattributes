@@ -1,11 +1,24 @@
 * text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
 *.sh text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+*.txt text eol=lf
 *.cs text eol=lf
+*.gd text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 *.csproj text eol=lf
 *.tscn text eol=lf
+*.tres text eol=lf
 *.godot text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.mp4 binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.zip binary
