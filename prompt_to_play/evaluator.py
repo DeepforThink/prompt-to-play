@@ -204,6 +204,14 @@ reproducibility, aggregate evaluation scores, acceptance, correction limits,
 or system policy. Those decisions belong exclusively to the host orchestrator.
 """
 
+VISUAL_EVALUATION_CORRECTION_PROMPT = """
+Your previous visual-feedback JSON passed transport parsing but failed the host
+contract. Return a corrected replacement JSON object only. Keep the camera
+observations grounded in the attached images. Use only the supplied real
+entity IDs, match each target kind to its entity, and use only patchable fields
+listed for that kind. Do not omit detailed suggested_changes for any issue.
+"""
+
 
 REPAIR_SYSTEM_PROMPT = """
 You are the RepairAgent in a prompt-to-play system. Return one corrected,
@@ -762,21 +770,32 @@ class VisualEvaluationAgent:
                 ),
             },
         ]
-        try:
-            response = _active_provider(self.provider, root).generate_json(
-                messages,
-                json_schema=_visual_feedback_schema(camera_ids),
-                schema_name="prompt_to_play_visual_feedback",
-                image_paths=[*references, *screenshots],
-            )
-        except ProviderError as exc:
-            raise VisualEvaluationProviderError(
-                "VisualEvaluationAgent provider failed"
-            ) from exc
-        except (OSError, RuntimeError) as exc:
-            raise VisualEvaluationProviderError(
-                "VisualEvaluationAgent provider failed"
-            ) from exc
+        provider = _active_provider(self.provider, root)
+
+        def request_feedback(
+            request_messages: Sequence[Mapping[str, str]],
+            schema_name: str,
+        ) -> Mapping[str, Any]:
+            try:
+                return provider.generate_json(
+                    request_messages,
+                    json_schema=_visual_feedback_schema(camera_ids),
+                    schema_name=schema_name,
+                    image_paths=[*references, *screenshots],
+                )
+            except ProviderError as exc:
+                raise VisualEvaluationProviderError(
+                    "VisualEvaluationAgent provider failed"
+                ) from exc
+            except (OSError, RuntimeError) as exc:
+                raise VisualEvaluationProviderError(
+                    "VisualEvaluationAgent provider failed"
+                ) from exc
+
+        response = request_feedback(
+            messages,
+            "prompt_to_play_visual_feedback",
+        )
         try:
             return validate_visual_feedback(
                 response,
@@ -784,8 +803,53 @@ class VisualEvaluationAgent:
                 min_scene_similarity=self.min_scene_similarity,
                 expected_camera_ids=camera_ids,
             )
-        except EvaluatorError as exc:
-            raise VisualFeedbackContractError(str(exc)) from exc
+        except EvaluatorError as first_error:
+            correction_payload = {
+                "validation_error": " ".join(str(first_error).split())[:1000],
+                "rejected_feedback": copy.deepcopy(response),
+                "allowed_targets": {
+                    kind: {
+                        "ids": sorted(
+                            entity_id
+                            for entity_id, entity_kind in _known_entity_kinds(
+                                world
+                            ).items()
+                            if entity_kind == kind
+                        ),
+                        "patchable_fields": sorted(
+                            contracts.PATCHABLE_FIELDS[kind]
+                        ),
+                    }
+                    for kind in contracts.TARGET_KINDS
+                },
+                "required_camera_ids": list(camera_ids),
+            }
+            corrected = request_feedback(
+                [
+                    {
+                        "role": "system",
+                        "content": VISUAL_EVALUATION_CORRECTION_PROMPT.strip(),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            correction_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                ],
+                "prompt_to_play_visual_feedback_correction",
+            )
+            try:
+                return validate_visual_feedback(
+                    corrected,
+                    world,
+                    min_scene_similarity=self.min_scene_similarity,
+                    expected_camera_ids=camera_ids,
+                )
+            except EvaluatorError as second_error:
+                raise VisualFeedbackContractError(str(second_error)) from second_error
 
 
 class RepairAgent:

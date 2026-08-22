@@ -71,6 +71,31 @@ public static class PrimitiveFactory
         return body;
     }
 
+    public static StaticBody3D AddBoxCollision(
+        Node parent,
+        string name,
+        Vector3 position,
+        Vector3 size,
+        bool addToWalkableGroup = false)
+    {
+        var body = new StaticBody3D
+        {
+            Name = name,
+            Position = position,
+        };
+        body.AddChild(new CollisionShape3D
+        {
+            Name = "Collision",
+            Shape = new BoxShape3D { Size = size },
+        });
+        if (addToWalkableGroup)
+        {
+            body.AddToGroup("ptp_walkable");
+        }
+        parent.AddChild(body);
+        return body;
+    }
+
     public static MeshInstance3D AddBoxVisual(
         Node parent,
         string name,

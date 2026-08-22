@@ -1162,6 +1162,7 @@ class PipelineStages:
                 contracts.canonical_json_bytes(persisted_refinement) + b"\n"
             )
         runtime = state.results.get(AGENT_RUNTIME_RESULT)
+        code_result: code_objects.CodeObjectResult | None = None
         if isinstance(runtime, agents.MultiAgentRuntime):
             code_result = code_objects.generate_code_objects(
                 runtime,
@@ -1199,6 +1200,14 @@ class PipelineStages:
         )
         shutil.copy2(asset_result.catalog_path, revision_dir / "asset_catalog.json")
         shutil.copy2(asset_result.manifest_path, revision_dir / "asset_manifest.json")
+        if code_result is not None:
+            shutil.copy2(
+                code_result.source_path,
+                revision_dir / "generated_code_objects.cs",
+            )
+            (revision_dir / "code_objects.json").write_bytes(
+                contracts.canonical_json_bytes(code_result.record) + b"\n"
+            )
         state.set_result(WORLD_RESULT, world)
         log(f"项目已发布：{project_dir}")
         log(f"WorldSpec 已写入：{spec_path}")
@@ -1442,6 +1451,7 @@ class PipelineStages:
         revision: int,
         world: Mapping[str, Any],
         asset_result: assets.AssetAgentResult,
+        code_result: code_objects.CodeObjectResult | None = None,
     ) -> None:
         revision_dir = (
             project_dir / "artifacts" / "runs" / run_id / f"rev_{revision}"
@@ -1452,6 +1462,14 @@ class PipelineStages:
         )
         shutil.copy2(asset_result.catalog_path, revision_dir / "asset_catalog.json")
         shutil.copy2(asset_result.manifest_path, revision_dir / "asset_manifest.json")
+        if code_result is not None:
+            shutil.copy2(
+                code_result.source_path,
+                revision_dir / "generated_code_objects.cs",
+            )
+            (revision_dir / "code_objects.json").write_bytes(
+                contracts.canonical_json_bytes(code_result.record) + b"\n"
+            )
 
     def _refresh_assets(
         self,
@@ -1461,8 +1479,28 @@ class PipelineStages:
         revision: int,
         world: Mapping[str, Any],
         log: LogSink,
+        *,
+        visual_feedback: Mapping[str, Any] | None = None,
     ) -> assets.AssetAgentResult:
         started = time.perf_counter()
+        code_result: code_objects.CodeObjectResult | None = None
+        runtime = state.results.get(AGENT_RUNTIME_RESULT)
+        if isinstance(runtime, agents.MultiAgentRuntime):
+            code_result = code_objects.generate_code_objects(
+                runtime,
+                state.request.prompt,
+                world,
+                project_dir,
+                environment=self.environment,
+                revision=revision,
+                visual_feedback=visual_feedback,
+            )
+            state.set_result(CODE_OBJECT_RESULT, code_result)
+            log(
+                "CodeObjectAgent："
+                f"修订 {revision} {code_result.status}，"
+                f"生成物体代码 {len(code_result.entity_ids)} 个"
+            )
         result = self.orchestrate_assets(
             world,
             project_dir,
@@ -1475,7 +1513,14 @@ class PipelineStages:
         results = state.results.setdefault(ASSET_RESULTS_RESULT, [])
         if isinstance(results, list):
             results.append(result)
-        self._snapshot_revision(project_dir, run_id, revision, world, result)
+        self._snapshot_revision(
+            project_dir,
+            run_id,
+            revision,
+            world,
+            result,
+            code_result,
+        )
         return result
 
     def build(self, state: PipelineState, log: LogSink) -> None:
@@ -1497,41 +1542,81 @@ class PipelineStages:
         build_environment["NUGET_FALLBACK_PACKAGES"] = os.fspath(
             toolchain.godot_nupkgs
         )
-        for index, command in enumerate((
-            (
-                os.fspath(toolchain.dotnet_exe),
-                "restore",
-                "--source",
-                os.fspath(toolchain.godot_nupkgs),
-                "--ignore-failed-sources",
-            ),
-            (os.fspath(toolchain.dotnet_exe), "build", "--no-restore"),
-        )):
+        restore_command = (
+            os.fspath(toolchain.dotnet_exe),
+            "restore",
+            "--source",
+            os.fspath(toolchain.godot_nupkgs),
+            "--ignore-failed-sources",
+        )
+        build_command = (
+            os.fspath(toolchain.dotnet_exe),
+            "build",
+            "--no-restore",
+        )
+
+        def compile_revision(revision: int) -> None:
             try:
-                self.run_command(command, project_dir, build_environment, log)
+                self.run_command(
+                    build_command,
+                    project_dir,
+                    build_environment,
+                    log,
+                )
             except PipelineIntegrationError:
-                code_result = state.results.get(CODE_OBJECT_RESULT)
-                if (
-                    index != 1
-                    or not isinstance(code_result, code_objects.CodeObjectResult)
-                    or code_result.status != "generated"
-                ):
+                revision_dir = (
+                    project_dir
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / f"rev_{revision}"
+                )
+                record_path = revision_dir / "code_objects.json"
+                if not record_path.is_file():
                     raise
-                code_result.source_path.write_text(
+                code_record = _read_json_object(
+                    record_path,
+                    f"revision {revision} code object record",
+                )
+                if code_record.get("status") != "generated":
+                    raise
+                source_path = project_dir / code_objects.GENERATED_SOURCE_PATH
+                source_path.write_text(
                     code_objects.default_source(), encoding="utf-8", newline="\n"
                 )
-                fallback_record = dict(code_result.record)
+                fallback_record = dict(code_record)
                 fallback_record["status"] = "compile_fallback"
                 fallback_record["entity_ids"] = []
                 fallback_result = code_objects.CodeObjectResult(
-                    "compile_fallback", (), code_result.source_path, fallback_record
+                    "compile_fallback", (), source_path, fallback_record
                 )
                 state.set_result(CODE_OBJECT_RESULT, fallback_result)
-                (project_dir / "artifacts" / "runs" / run_id / "code_objects.json").write_bytes(
+                record_path.write_bytes(
+                    contracts.canonical_json_bytes(fallback_record) + b"\n"
+                )
+                shutil.copy2(
+                    source_path,
+                    revision_dir / "generated_code_objects.cs",
+                )
+                (
+                    project_dir
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / "code_objects.json"
+                ).write_bytes(
                     contracts.canonical_json_bytes(fallback_record) + b"\n"
                 )
                 log("CodeObjectAgent：生成代码编译失败，已回退内置物体并重试构建")
-                self.run_command(command, project_dir, build_environment, log)
+                self.run_command(
+                    build_command,
+                    project_dir,
+                    build_environment,
+                    log,
+                )
+
+        self.run_command(restore_command, project_dir, build_environment, log)
+        compile_revision(0)
         _timings(state)["build"] += _elapsed_ms(build_started)
 
         runtime = state.results.get(AGENT_RUNTIME_RESULT)
@@ -1784,7 +1869,9 @@ class PipelineStages:
                 revision + 1,
                 world,
                 log,
+                visual_feedback=feedback,
             )
+            compile_revision(revision + 1)
             state.set_result(WORLD_RESULT, copy.deepcopy(world))
             log(f"Repair Orchestrator：已合并并应用修订 {revision + 1}")
 
@@ -1821,6 +1908,26 @@ class PipelineStages:
         )
         shutil.copy2(selected_dir / "asset_catalog.json", project_dir / "assets" / "catalog.json")
         shutil.copy2(selected_dir / "asset_manifest.json", project_dir / "assets" / "manifest.json")
+        selected_code_path = selected_dir / "generated_code_objects.cs"
+        active_code_path = project_dir / code_objects.GENERATED_SOURCE_PATH
+        if selected_code_path.is_file():
+            code_changed = selected_code_path.read_bytes() != active_code_path.read_bytes()
+            if code_changed:
+                shutil.copy2(selected_code_path, active_code_path)
+                selected_code_record = _read_json_object(
+                    selected_dir / "code_objects.json",
+                    "selected code object record",
+                )
+                state.set_result(
+                    CODE_OBJECT_RESULT,
+                    code_objects.CodeObjectResult(
+                        str(selected_code_record["status"]),
+                        tuple(selected_code_record.get("entity_ids", [])),
+                        active_code_path,
+                        selected_code_record,
+                    ),
+                )
+                compile_revision(selected_revision)
         selected_structural = _read_json_object(
             selected_dir / "structural_report.json", "selected structural report"
         )

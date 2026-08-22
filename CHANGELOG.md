@@ -1,5 +1,12 @@
 # Changelog
 
+**2026-08-22 - Evaluation-guided Godot code revisions**
+- VisualEvaluationAgent retries one host-contract violation with the exact validation error, real entity IDs, camera IDs, and patchable fields.
+- Every Repair revision regenerates prompt-specific Godot C#, rebuilds it, and snapshots the source and generation record; selecting an earlier best revision restores its matching code.
+- CodeObjectAgent covers regions and roads as well as placed objects. The host supplies stable IDs and collision while generated C# controls visible terrain, continuous paths, and object silhouettes.
+- The built-in renderer uses terraced contour terrain and high-contrast marked tracks when generated code is unavailable. Runtime random decoration is opt-in, and orbit capture poses adapt to world bounds and elevation.
+- Verified against `topographic_ridge_circuit`: 160 Python tests, Godot .NET build with zero warnings/errors, structural checks, and three rendered evaluation views.
+
 **2026-07-02 — Docs-only runtime**
 - Replaced the multi-stage skill pipeline with a thin runtime: a single engine-agnostic manifest (`prompts/runtime.md`), a one-page per-engine guide, and the cross-engine `asset-gen` skill. The model plans, scaffolds, and decomposes the work itself.
 - One runtime manifest covers delivery. The agent reads how the task is framed in-run: an open-ended direction gets the live game early and checkpoints at taste/scope/cost decisions; a finished brief runs on reasonable calls and closes with a 15–20s proof recording, watched back before done. Run/show/capture mechanics live in the engine guides and serve both paths.

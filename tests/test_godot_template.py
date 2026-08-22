@@ -101,6 +101,15 @@ class GodotTemplateTests(unittest.TestCase):
         )
         self.assertIn("return false;", self.generated_objects)
         self.assertIn("Color ground", self.generated_objects)
+        self.assertIn('"region",\n            region.Kind', self.runtime)
+        self.assertIn('"road",\n            road.Kind', self.runtime)
+        self.assertIn("Vector3[] path", self.generated_objects)
+
+    def test_runtime_has_coherent_visual_fallbacks_without_random_clutter(self):
+        self.assertIn("BuildRegionFallback(root, region, size, rng)", self.runtime)
+        self.assertIn('OS.GetEnvironment("PROMPT_TO_PLAY_RUNTIME_DECORATION") == "on"', self.runtime)
+        self.assertIn('"CenterMarking"', self.runtime)
+        self.assertIn('cameraSpec.Kind != "orbit"', self.runtime)
 
     def test_interactables_try_catalog_assets_before_glow_primitive(self):
         start = self.runtime.index("private void BuildInteractables()")

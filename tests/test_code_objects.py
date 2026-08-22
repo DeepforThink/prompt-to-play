@@ -27,10 +27,12 @@ class Provider:
 
 def expected_ids(world):
     return [
+        *[item["id"] for item in world["regions"]],
+        *[item["id"] for item in world["roads"]],
         *[item["id"] for item in world["buildings"]],
         *[item["id"] for item in world["interactions"]["interactables"]],
         *[item["id"] for item in world["props"]],
-    ][:16]
+    ][: len(world["regions"]) + len(world["roads"]) + 16]
 
 
 class CodeObjectAgentTests(unittest.TestCase):
@@ -56,8 +58,11 @@ class CodeObjectAgentTests(unittest.TestCase):
 
         self.assertEqual(result.status, "generated")
         self.assertEqual(list(result.entity_ids), ids)
+        self.assertIn(f'case "{world["regions"][0]["id"]}":', source)
         self.assertIn('case "ancient_oak":', source)
         self.assertIn("PrimitiveFactory.AddSphereVisual", source)
+        self.assertIn("string entityKind", source)
+        self.assertIn("Vector3[] path", source)
         self.assertEqual(runtime.traces()[0].task_id, "code_objects_01")
 
     def test_forbidden_code_is_replaced_by_default(self):

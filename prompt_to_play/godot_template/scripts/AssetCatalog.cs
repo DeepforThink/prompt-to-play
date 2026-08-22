@@ -77,7 +77,6 @@ public sealed class AssetCatalog
                 if (string.IsNullOrWhiteSpace(entry.Prefab) ||
                     string.IsNullOrWhiteSpace(entry.ScenePath))
                 {
-                    GD.PushWarning("Ignoring asset catalog entry with an empty prefab or scene_path.");
                     continue;
                 }
                 if (!entries.TryAdd(entry.Prefab, entry))

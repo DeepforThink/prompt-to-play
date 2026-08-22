@@ -95,6 +95,16 @@ class FakeProvider:
         return copy.deepcopy(self.response)
 
 
+class SequenceProvider(FakeProvider):
+    def __init__(self, responses):
+        super().__init__(None)
+        self.responses = list(responses)
+
+    def generate_json(self, messages, **kwargs):
+        self.response = self.responses[len(self.calls)]
+        return super().generate_json(messages, **kwargs)
+
+
 class VisualEvaluationAgentTests(unittest.TestCase):
     def test_agent_distinguishes_provider_failure_from_output_contract_failure(self):
         world = read_world()
@@ -129,6 +139,33 @@ class VisualEvaluationAgentTests(unittest.TestCase):
                 contract_agent.evaluate(
                     world["brief"]["text"], world, [screenshot]
                 )
+
+    def test_agent_retries_one_invalid_contract_with_host_constraints(self):
+        world = read_world()
+        corrected = rejected_observation()
+        provider = SequenceProvider(
+            [
+                rejected_observation("invented_by_model"),
+                corrected,
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            screenshot = root / "overview.png"
+            screenshot.write_bytes(b"rendered pixels")
+            agent = evaluator.VisualEvaluationAgent(provider, project_root=root)
+            result = agent.evaluate(world["brief"]["text"], world, [screenshot])
+
+        self.assertEqual(result["issues"], corrected["issues"])
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(
+            provider.calls[1]["schema_name"],
+            "prompt_to_play_visual_feedback_correction",
+        )
+        correction = json.loads(provider.calls[1]["messages"][1]["content"])
+        self.assertIn("unknown WorldSpec entity", correction["validation_error"])
+        self.assertIn("pipe_cluster", correction["allowed_targets"]["prop"]["ids"])
+        self.assertEqual(correction["required_camera_ids"], ["overview"])
 
     def test_agent_sends_screenshots_and_returns_only_strict_visual_feedback(self):
         world = read_world()

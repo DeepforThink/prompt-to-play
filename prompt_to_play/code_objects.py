@@ -23,13 +23,20 @@ You are CodeObjectAgent. Write the body of one C# switch statement that builds
 distinct Godot 4.7 C# geometry for the supplied WorldSpec entities. Return JSON
 only. Emit exactly one `case "stable_id":` for every requested entity ID and
 finish each case with `return true;`. The body runs inside a method with these
-variables: stableId, prefab, root (Node3D), scale (Vector3), seed (uint),
-primary/accent/ground/emissive (Color). Use only Godot node, mesh, shape, material,
-Vector3, Color, Mathf, RandomNumberGenerator, and PromptToPlay.PrimitiveFactory
-APIs. Add useful collision bodies for solid objects. Do not read files, load
-resources, use networking, processes, reflection, environment variables,
-signals, scene-tree traversal, or external assets. Keep all geometry below 96
-nodes total and make silhouettes visibly specific to the prompt.
+variables: stableId, entityKind, prefab, root (Node3D), scale (Vector3), path
+(Vector3[]), seed (uint), primary/accent/ground/emissive (Color). For regions,
+root is positioned at the region surface, scale is its full size, prefab is its
+semantic kind, and geometry must use local coordinates. For roads, root is at
+the world origin, scale.X is road width, path contains world-space waypoints,
+and prefab is the road kind. The host already creates region and road collision;
+generate their visible terrain and continuous path geometry. Use only Godot
+node, mesh, shape, material, Vector3, Color, Mathf, RandomNumberGenerator, and
+PromptToPlay.PrimitiveFactory APIs. Add useful collision bodies for other solid
+objects. Do not read files, load resources, use networking, processes,
+reflection, environment variables, signals, scene-tree traversal, or external
+assets. Keep all geometry below 160 nodes total and make silhouettes visibly
+specific to the prompt. Prioritize coherent terrain and readable roads over
+small decorative detail.
 """
 
 RESPONSE_SCHEMA: Mapping[str, Any] = {
@@ -39,7 +46,7 @@ RESPONSE_SCHEMA: Mapping[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "minItems": 1,
-            "maxItems": DEFAULT_CODE_OBJECT_MAX_ENTITIES,
+            "maxItems": 64,
         },
         "csharp_switch_body": {"type": "string", "minLength": 1, "maxLength": 50000},
     },
@@ -95,7 +102,44 @@ def _entities(world: Mapping[str, Any], limit: int) -> list[dict[str, Any]]:
                     "scale": copy.deepcopy(value.get("scale", [1.0, 1.0, 1.0])),
                 }
             )
-    return candidates[:limit]
+    placed = candidates[:limit]
+    regions = [
+        {
+            "kind": "region",
+            "id": value["id"],
+            "prefab": value["kind"],
+            "scale": copy.deepcopy(value["size"]),
+            "center": copy.deepcopy(value["center"]),
+            "elevation": value["elevation"],
+        }
+        for value in world["regions"]
+    ]
+    region_by_id = {value["id"]: value for value in world["regions"]}
+    roads = [
+        {
+            "kind": "road",
+            "id": value["id"],
+            "prefab": value["kind"],
+            "scale": [value["width"], 1.0, 1.0],
+            "from": value["from"],
+            "to": value["to"],
+            "waypoints": [
+                [
+                    region_by_id[value["from"]]["center"][0],
+                    region_by_id[value["from"]]["elevation"],
+                    region_by_id[value["from"]]["center"][2],
+                ],
+                *copy.deepcopy(value["waypoints"]),
+                [
+                    region_by_id[value["to"]]["center"][0],
+                    region_by_id[value["to"]]["elevation"],
+                    region_by_id[value["to"]]["center"][2],
+                ],
+            ],
+        }
+        for value in world["roads"]
+    ]
+    return [*regions, *roads, *placed]
 
 
 def default_source() -> str:
@@ -115,9 +159,11 @@ public static class GeneratedCodeObjects
 {{
     public static bool TryBuild(
         string stableId,
+        string entityKind,
         string prefab,
         Node3D root,
         Vector3 scale,
+        Vector3[] path,
         uint seed,
         Color primary,
         Color accent,
@@ -175,6 +221,8 @@ def generate_code_objects(
     project_root: str | Path,
     *,
     environment: Mapping[str, str] | None = None,
+    revision: int = 0,
+    visual_feedback: Mapping[str, Any] | None = None,
 ) -> CodeObjectResult:
     world = contracts.validate_world(world_document)
     root = Path(project_root).resolve(strict=True)
@@ -188,16 +236,28 @@ def generate_code_objects(
             status="empty",
             entity_ids=(),
             source_path=output,
-            record={"schema": CODE_OBJECT_SCHEMA, "status": "empty", "entity_ids": []},
+            record={
+                "schema": CODE_OBJECT_SCHEMA,
+                "status": "empty",
+                "revision": revision,
+                "entity_ids": [],
+            },
         )
 
     payload = {
         "original_prompt": prompt,
         "style": copy.deepcopy(world["style"]),
         "entities": selected,
+        "revision": revision,
+        "visual_feedback": (
+            copy.deepcopy(dict(visual_feedback))
+            if isinstance(visual_feedback, Mapping)
+            else None
+        ),
     }
     try:
-        provider = runtime.subagent(agents.AgentRole.CODE_OBJECT, "code_objects_01")
+        task_id = f"code_objects_{revision + 1:02d}"
+        provider = runtime.subagent(agents.AgentRole.CODE_OBJECT, task_id)
         response = provider.generate_json(
             [
                 {"role": "system", "content": SYSTEM_PROMPT.strip()},
@@ -225,6 +285,7 @@ def generate_code_objects(
     record = {
         "schema": CODE_OBJECT_SCHEMA,
         "status": status,
+        "revision": revision,
         "entity_ids": list(expected_ids if status == "generated" else ()),
         "source_sha256": source_sha256,
         "error_type": error_type,

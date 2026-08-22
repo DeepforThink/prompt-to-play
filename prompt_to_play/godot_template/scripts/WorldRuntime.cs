@@ -428,43 +428,102 @@ public partial class WorldRuntime : Node3D
     {
         uint seed = region.GenerationSeed ?? StableSeed.Derive(_spec.Seed, region.Id);
         var rng = new RandomNumberGenerator { Seed = seed };
-        Color surfaceColor = _groundColor.Lerp(_primaryColor, rng.RandfRange(0.08f, 0.25f));
-        var surfaceMaterial = PrimitiveFactory.Material(surfaceColor, metallic: 0.18f);
-
         Vector3 size = ToVector3(region.Size);
         float thickness = Mathf.Clamp(size.Y * 0.2f, 1.0f, 3.0f);
-        Vector3 center = new(region.Center[0], region.Elevation - thickness * 0.5f, region.Center[2]);
-        StaticBody3D deck = PrimitiveFactory.AddBoxBody(
-            _generated,
-            SafeNodeName(region.Id),
-            center,
-            new Vector3(size.X, thickness, size.Z),
-            surfaceMaterial);
-        deck.AddToGroup("ptp_walkable");
-        RegisterStable(deck, region.Id, "region", seed, center);
-
-        var accentMaterial = PrimitiveFactory.Material(_accentColor, metallic: 0.35f);
-        float pylonHeight = Mathf.Clamp(size.Y * 0.45f, 1.5f, 5.0f);
-        float inset = 1.25f;
-        Vector3[] corners =
+        Vector3 position = new(region.Center[0], region.Elevation, region.Center[2]);
+        var root = new Node3D
         {
-            new(-size.X * 0.5f + inset, thickness * 0.5f + pylonHeight * 0.5f, -size.Z * 0.5f + inset),
-            new(size.X * 0.5f - inset, thickness * 0.5f + pylonHeight * 0.5f, -size.Z * 0.5f + inset),
-            new(-size.X * 0.5f + inset, thickness * 0.5f + pylonHeight * 0.5f, size.Z * 0.5f - inset),
-            new(size.X * 0.5f - inset, thickness * 0.5f + pylonHeight * 0.5f, size.Z * 0.5f - inset),
+            Name = SafeNodeName(region.Id),
+            Position = position,
         };
-        for (int index = 0; index < corners.Length; index++)
+        _generated.AddChild(root);
+        root.AddToGroup("ptp_walkable");
+        RegisterStable(root, region.Id, "region", seed, position);
+        PrimitiveFactory.AddBoxCollision(
+            root,
+            "TerrainCollision",
+            new Vector3(0.0f, -thickness * 0.5f, 0.0f),
+            new Vector3(size.X, thickness, size.Z),
+            addToWalkableGroup: true);
+
+        bool codeGenerated = GeneratedCodeObjects.TryBuild(
+            region.Id,
+            "region",
+            region.Kind,
+            root,
+            size,
+            Array.Empty<Vector3>(),
+            seed,
+            _primaryColor,
+            _accentColor,
+            _groundColor,
+            _emissiveColor,
+            out string codeFailure);
+        if (codeGenerated)
         {
-            PrimitiveFactory.AddCylinderVisual(
-                deck,
-                $"Pylon{index + 1}",
-                corners[index],
-                0.24f,
-                pylonHeight,
-                accentMaterial);
+            root.SetMeta("asset_resolution", "llm_code");
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(codeFailure))
+            {
+                root.SetMeta("code_generation_error", codeFailure);
+            }
+            BuildRegionFallback(root, region, size, rng);
         }
 
-        BuildRegionDecoration(region, size, rng);
+        if (OS.GetEnvironment("PROMPT_TO_PLAY_RUNTIME_DECORATION") == "on")
+        {
+            BuildRegionDecoration(region, size, rng);
+        }
+    }
+
+    private void BuildRegionFallback(
+        Node3D root,
+        RegionSpec region,
+        Vector3 size,
+        RandomNumberGenerator rng)
+    {
+        string semantic = $"{region.Kind} {_spec.Style.Theme} {_spec.Brief.Text}".ToLowerInvariant();
+        bool topographic = ContainsAny(
+            semantic,
+            "topographic", "contour", "cartograph", "heightmap", "地形图", "等高线");
+        if (!topographic)
+        {
+            Color surfaceColor = _groundColor.Lerp(
+                _primaryColor,
+                rng.RandfRange(0.08f, 0.20f));
+            PrimitiveFactory.AddBoxVisual(
+                root,
+                "Surface",
+                new Vector3(0.0f, -0.25f, 0.0f),
+                new Vector3(size.X, 0.5f, size.Z),
+                PrimitiveFactory.Material(surfaceColor, metallic: 0.08f));
+            return;
+        }
+
+        bool border = ContainsAny(region.Kind.ToLowerInvariant(), "border", "wall", "边界", "山墙");
+        bool peak = ContainsAny(region.Kind.ToLowerInvariant(), "peak", "ridge", "mountain", "峰", "山脊");
+        int layers = border ? 7 : peak ? 6 : 4;
+        float topScale = border ? 0.78f : peak ? 0.68f : 0.88f;
+        for (int layer = 0; layer < layers; layer++)
+        {
+            float progress = layers == 1 ? 1.0f : layer / (float)(layers - 1);
+            float footprint = Mathf.Lerp(1.0f, topScale, progress);
+            float height = border ? 0.42f : 0.30f;
+            float y = -(layers - layer - 1) * height - height * 0.5f;
+            Color color = _groundColor.Lerp(
+                _accentColor,
+                (border ? 0.26f : 0.12f) + progress * 0.16f);
+            var terrace = PrimitiveFactory.AddCylinderVisual(
+                root,
+                $"Contour{layer:D2}",
+                new Vector3(0.0f, y, 0.0f),
+                0.5f,
+                height,
+                PrimitiveFactory.Material(color, roughness: 0.92f));
+            terrace.Scale = new Vector3(size.X * footprint, 1.0f, size.Z * footprint);
+        }
     }
 
     private void BuildRegionDecoration(
@@ -585,48 +644,118 @@ public partial class WorldRuntime : Node3D
         _generated.AddChild(root);
         RegisterStable(root, road.Id, "road", roadSeed, Vector3.Zero);
 
-        var deckMaterial = PrimitiveFactory.Material(
-            _primaryColor.Lerp(_groundColor, 0.35f),
-            metallic: 0.3f);
-        var railMaterial = PrimitiveFactory.Material(_accentColor, metallic: 0.55f);
-        for (int index = 0; index < road.Waypoints.Count - 1; index++)
+        RegionSpec fromRegion = _spec.Regions.First(region => region.Id == road.From);
+        RegionSpec toRegion = _spec.Regions.First(region => region.Id == road.To);
+        var pathPoints = new List<Vector3>
         {
-            Vector3 from = ToVector3(road.Waypoints[index]);
-            Vector3 to = ToVector3(road.Waypoints[index + 1]);
+            new(fromRegion.Center[0], fromRegion.Elevation, fromRegion.Center[2]),
+        };
+        pathPoints.AddRange(road.Waypoints.Select(ToVector3));
+        pathPoints.Add(new Vector3(
+            toRegion.Center[0],
+            toRegion.Elevation,
+            toRegion.Center[2]));
+        Vector3[] path = pathPoints
+            .Where((point, index) => index == 0 || point.DistanceSquaredTo(pathPoints[index - 1]) > 0.01f)
+            .ToArray();
+        var segments = new List<(StaticBody3D Body, float Length)>();
+        for (int index = 0; index < path.Length - 1; index++)
+        {
+            Vector3 from = path[index];
+            Vector3 to = path[index + 1];
             Vector3 delta = to - from;
             float length = delta.Length();
             Vector3 center = (from + to) * 0.5f - Vector3.Up * 0.25f;
             string segmentId = RuntimeId($"road.{road.Id}.segment.{index:D2}");
-            StaticBody3D segment = PrimitiveFactory.AddBoxBody(
+            StaticBody3D segment = PrimitiveFactory.AddBoxCollision(
                 root,
                 $"Segment{index:D2}",
                 center,
                 new Vector3(road.Width, 0.5f, length),
-                deckMaterial);
+                addToWalkableGroup: true);
             Vector3 up = Mathf.Abs(delta.Normalized().Dot(Vector3.Up)) > 0.98f
                 ? Vector3.Forward
                 : Vector3.Up;
             segment.LookAt(to - Vector3.Up * 0.25f, up);
-            segment.AddToGroup("ptp_walkable");
             RegisterStable(
                 segment,
                 segmentId,
                 "road_segment",
                 StableSeed.Derive(_spec.Seed, segmentId),
                 center);
+            segments.Add((segment, length));
+        }
 
+        bool codeGenerated = GeneratedCodeObjects.TryBuild(
+            road.Id,
+            "road",
+            road.Kind,
+            root,
+            new Vector3(road.Width, 1.0f, 1.0f),
+            path,
+            roadSeed,
+            _primaryColor,
+            _accentColor,
+            _groundColor,
+            _emissiveColor,
+            out string codeFailure);
+        if (codeGenerated)
+        {
+            root.SetMeta("asset_resolution", "llm_code");
+            return;
+        }
+        if (!string.IsNullOrEmpty(codeFailure))
+        {
+            root.SetMeta("code_generation_error", codeFailure);
+        }
+
+        bool racingTrack = ContainsAny(
+            road.Kind.ToLowerInvariant(),
+            "race", "track", "circuit", "赛道", "竞速");
+        bool needsRails = ContainsAny(
+            road.Kind.ToLowerInvariant(),
+            "bridge", "elevated", "桥", "高架");
+        var trackMaterial = PrimitiveFactory.Material(
+            racingTrack ? _primaryColor : _groundColor.Lerp(_accentColor, 0.45f),
+            metallic: 0.08f,
+            roughness: 0.78f);
+        var markingMaterial = PrimitiveFactory.Material(
+            racingTrack ? _emissiveColor : _accentColor,
+            roughness: 0.72f);
+        var railMaterial = PrimitiveFactory.Material(_accentColor, metallic: 0.35f);
+        for (int index = 0; index < segments.Count; index++)
+        {
+            (StaticBody3D segment, float length) = segments[index];
             PrimitiveFactory.AddBoxVisual(
                 segment,
-                "RailLeft",
-                new Vector3(-road.Width * 0.5f + 0.12f, 0.55f, 0.0f),
-                new Vector3(0.18f, 0.8f, length),
-                railMaterial);
-            PrimitiveFactory.AddBoxVisual(
-                segment,
-                "RailRight",
-                new Vector3(road.Width * 0.5f - 0.12f, 0.55f, 0.0f),
-                new Vector3(0.18f, 0.8f, length),
-                railMaterial);
+                "Track",
+                new Vector3(0.0f, 0.30f, 0.0f),
+                new Vector3(road.Width, 0.10f, length),
+                trackMaterial);
+            if (racingTrack)
+            {
+                PrimitiveFactory.AddBoxVisual(
+                    segment,
+                    "CenterMarking",
+                    new Vector3(0.0f, 0.37f, 0.0f),
+                    new Vector3(Mathf.Max(0.12f, road.Width * 0.045f), 0.035f, length * 0.82f),
+                    markingMaterial);
+            }
+            if (needsRails)
+            {
+                PrimitiveFactory.AddBoxVisual(
+                    segment,
+                    "RailLeft",
+                    new Vector3(-road.Width * 0.5f + 0.12f, 0.55f, 0.0f),
+                    new Vector3(0.18f, 0.8f, length),
+                    railMaterial);
+                PrimitiveFactory.AddBoxVisual(
+                    segment,
+                    "RailRight",
+                    new Vector3(road.Width * 0.5f - 0.12f, 0.55f, 0.0f),
+                    new Vector3(0.18f, 0.8f, length),
+                    railMaterial);
+            }
         }
     }
 
@@ -654,9 +783,11 @@ public partial class WorldRuntime : Node3D
 
         if (GeneratedCodeObjects.TryBuild(
                 stableId,
+                kind,
                 prefab,
                 root,
                 scale,
+                Array.Empty<Vector3>(),
                 seed,
                 _primaryColor,
                 _accentColor,
@@ -900,15 +1031,16 @@ public partial class WorldRuntime : Node3D
     {
         foreach (CameraSpec cameraSpec in _spec.Cameras.OrderBy(item => item.Id, StringComparer.Ordinal))
         {
+            (Vector3 position, Vector3 target) = ResolveEvaluationCameraPose(cameraSpec);
             var camera = new Camera3D
             {
                 Name = SafeNodeName(cameraSpec.Id),
-                Position = ToVector3(cameraSpec.Position),
+                Position = position,
                 Fov = cameraSpec.FovDegrees,
                 Current = false,
             };
             _generated.AddChild(camera);
-            camera.LookAt(ToVector3(cameraSpec.LookAt), Vector3.Up);
+            camera.LookAt(target, Vector3.Up);
             camera.SetMeta("camera_kind", cameraSpec.Kind);
             camera.SetMeta("resolution_width", cameraSpec.Resolution[0]);
             camera.SetMeta("resolution_height", cameraSpec.Resolution[1]);
@@ -997,9 +1129,11 @@ public partial class WorldRuntime : Node3D
             };
             bool codeGenerated = GeneratedCodeObjects.TryBuild(
                 spec.Id,
+                "interactable",
                 spec.Prefab,
                 interactable,
                 Vector3.One,
+                Array.Empty<Vector3>(),
                 seed,
                 _primaryColor,
                 _accentColor,
@@ -1203,8 +1337,9 @@ public partial class WorldRuntime : Node3D
                 GetWindow().Size = new Vector2I(
                     cameraSpec.Resolution[0],
                     cameraSpec.Resolution[1]);
-                camera.GlobalPosition = ToVector3(cameraSpec.Position);
-                camera.LookAt(ToVector3(cameraSpec.LookAt), Vector3.Up);
+                (Vector3 position, Vector3 target) = ResolveEvaluationCameraPose(cameraSpec);
+                camera.GlobalPosition = position;
+                camera.LookAt(target, Vector3.Up);
                 camera.MakeCurrent();
 
                 for (int frame = 0; frame < 5; frame++)
@@ -1215,7 +1350,6 @@ public partial class WorldRuntime : Node3D
                     RenderingServer.Singleton,
                     RenderingServer.SignalName.FramePostDraw);
 
-                Vector3 target = ToVector3(cameraSpec.LookAt);
                 GD.Print(
                     $"Capture camera {cameraSpec.Id}: position={camera.GlobalPosition}, " +
                     $"target={target}, forward={-camera.GlobalBasis.Z}, current={camera.Current}, " +
@@ -1286,6 +1420,38 @@ public partial class WorldRuntime : Node3D
             }
         }
         return maximum - minimum >= 0.03f;
+    }
+
+    private (Vector3 Position, Vector3 Target) ResolveEvaluationCameraPose(
+        CameraSpec cameraSpec)
+    {
+        Vector3 position = ToVector3(cameraSpec.Position);
+        Vector3 target = ToVector3(cameraSpec.LookAt);
+        if (cameraSpec.Kind != "orbit")
+        {
+            return (position, target);
+        }
+
+        float minX = _spec.Regions.Min(region => region.Center[0] - region.Size[0] * 0.5f);
+        float maxX = _spec.Regions.Max(region => region.Center[0] + region.Size[0] * 0.5f);
+        float minZ = _spec.Regions.Min(region => region.Center[2] - region.Size[2] * 0.5f);
+        float maxZ = _spec.Regions.Max(region => region.Center[2] + region.Size[2] * 0.5f);
+        float span = Mathf.Max(maxX - minX, maxZ - minZ);
+        float maxElevation = _spec.Regions.Max(region => region.Elevation);
+        Vector3 horizontal = new(position.X - target.X, 0.0f, position.Z - target.Z);
+        float minimumDistance = Mathf.Max(18.0f, span * 0.30f);
+        if (horizontal.Length() < minimumDistance)
+        {
+            if (horizontal.LengthSquared() < 0.01f)
+            {
+                horizontal = new Vector3(-1.0f, 0.0f, -1.0f);
+            }
+            horizontal = horizontal.Normalized() * minimumDistance;
+            position.X = target.X + horizontal.X;
+            position.Z = target.Z + horizontal.Z;
+        }
+        position.Y = Mathf.Max(position.Y, maxElevation + Mathf.Max(18.0f, span * 0.42f));
+        return (position, target);
     }
 
     private IReadOnlyList<StructuralCheck> EvaluateStructure()

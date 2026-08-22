@@ -733,6 +733,22 @@ class PipelineStageTests(unittest.TestCase):
                     revised["lights"][0]["energy"] += 1
                 return revised
 
+        class CodeProvider:
+            payloads = []
+
+            def generate_json(self, messages, **_kwargs):
+                payload = json.loads(messages[-1]["content"])
+                self.payloads.append(payload)
+                entity_ids = [item["id"] for item in payload["entities"]]
+                body = "\n".join(
+                    f'case "{entity_id}": return true;'
+                    for entity_id in entity_ids
+                )
+                return {
+                    "entity_ids": entity_ids,
+                    "csharp_switch_body": body,
+                }
+
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             source_repo = workspace / "prompt-to-play"
@@ -762,6 +778,7 @@ class PipelineStageTests(unittest.TestCase):
                 agents.AgentRole.WORLD_PLANNER: PlannerProvider(),
                 agents.AgentRole.VISUAL_EVALUATOR: VisualProvider(),
                 agents.AgentRole.REPAIR: RepairProvider(),
+                agents.AgentRole.CODE_OBJECT: CodeProvider(),
             }
             refinement_providers = []
 
@@ -951,11 +968,11 @@ class PipelineStageTests(unittest.TestCase):
             )
             evaluations = state.require_result(pipeline.EVALUATIONS_RESULT)
             self.assertEqual(
-                [item["iteration"] for item in evaluations], [0, 1]
+                [item["iteration"] for item in evaluations], [0, 1, 2]
             )
             self.assertEqual(
                 [item["status"] for item in evaluations],
-                ["fail", "fail"],
+                ["fail", "fail", "fail"],
             )
             self.assertEqual(evaluations[1]["metrics"]["reproducibility"], 0.5)
             delivery = json.loads(
@@ -966,10 +983,7 @@ class PipelineStageTests(unittest.TestCase):
             self.assertEqual(delivery["mode"], "best_effort")
             self.assertFalse(delivery["evaluation_passed"])
             self.assertEqual(delivery["revision"], 1)
-            self.assertEqual(
-                delivery["correction_stop"]["reason"],
-                "visual_evaluation_rejected",
-            )
+            self.assertIsNone(delivery["correction_stop"])
             self.assertEqual(
                 delivery["visual_guidance"][0]["suggested_changes"][0]["field"],
                 "scale",
@@ -982,43 +996,50 @@ class PipelineStageTests(unittest.TestCase):
                 / "rev_2"
                 / "visual_evaluation_error.json"
             )
-            evaluation_error = json.loads(
-                evaluation_error_path.read_text(encoding="utf-8")
+            self.assertFalse(evaluation_error_path.exists())
+            self.assertTrue(
+                (evaluation_error_path.with_name("evaluation.json")).is_file()
             )
-            self.assertEqual(
-                evaluation_error["schema"],
-                "prompt-to-play/visual-evaluation-error@1",
-            )
-            self.assertEqual(evaluation_error["status"], "rejected")
-            self.assertEqual(
-                evaluation_error["error_type"], "VisualFeedbackContractError"
-            )
-            self.assertEqual(
-                evaluation_error["measurement_status"], "not_measured"
-            )
-            self.assertEqual(
-                delivery["visual_evaluation_error"], evaluation_error
-            )
-            self.assertFalse(
-                (evaluation_error_path.with_name("evaluation.json")).exists()
-            )
-            self.assertFalse(
+            self.assertTrue(
                 (
                     project / "artifacts" / "runs" / run_id / "rev_2"
                     / "visual_feedback.json"
-                ).exists()
+                ).is_file()
             )
-            persisted_error = evaluation_error_path.read_text(encoding="utf-8")
+            self.assertIsNone(delivery["visual_evaluation_error"])
             persisted_delivery = (
                 project / "artifacts" / "runs" / run_id / "delivery.json"
             ).read_text(encoding="utf-8")
-            self.assertNotIn("sk-sensitive-evaluator-output", persisted_error)
             self.assertNotIn("sk-sensitive-evaluator-output", persisted_delivery)
             self.assertNotIn(
                 "repair_03",
                 [payload["task_id"] for payload in RepairProvider.payloads],
             )
+            self.assertEqual(
+                [payload["revision"] for payload in CodeProvider.payloads],
+                [0, 1, 2],
+            )
+            self.assertIsNone(CodeProvider.payloads[0]["visual_feedback"])
+            self.assertEqual(
+                CodeProvider.payloads[1]["visual_feedback"]["issues"][0][
+                    "code"
+                ],
+                "landmark_too_small",
+            )
+            for revision in range(3):
+                revision_root = (
+                    project
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / f"rev_{revision}"
+                )
+                self.assertTrue(
+                    (revision_root / "generated_code_objects.cs").is_file()
+                )
+                self.assertTrue((revision_root / "code_objects.json").is_file())
             visual_provider = role_providers[agents.AgentRole.VISUAL_EVALUATOR]
+            self.assertEqual(visual_provider.calls, 4)
             published_reference = next((project / "references").iterdir()).resolve()
             self.assertEqual(
                 visual_provider.image_paths[0][0], published_reference
