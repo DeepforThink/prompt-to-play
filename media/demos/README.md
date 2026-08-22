@@ -1,6 +1,6 @@
 # Demo Media
 
-This directory contains the curated GitHub showcase copies of three local presentation recordings.
+This directory contains the optimized videos and poster images used in the project gallery.
 
 | Demo | Video | Poster |
 | --- | --- | --- |
@@ -8,4 +8,4 @@ This directory contains the curated GitHub showcase copies of three local presen
 | Skybound: Wind Crystal Expedition | <code>skybound-wind-crystal-expedition.mp4</code> | <code>skybound-wind-crystal-expedition.jpg</code> |
 | Orbital Salvage: Core Extraction | <code>orbital-salvage-core-extraction.mp4</code> | <code>orbital-salvage-core-extraction.jpg</code> |
 
-The MP4 files are 960-pixel-wide H.264/AAC derivatives optimized for repository browsing and kept below 10 MB each. The original recordings remain outside Git and should not be added to the repository.
+The MP4 files use H.264/AAC and are optimized for reliable playback on GitHub.

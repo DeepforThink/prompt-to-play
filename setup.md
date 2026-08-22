@@ -1,6 +1,6 @@
 # Prompt-to-Play Workstation Setup
 
-The supported presentation workflow targets Windows and Godot 4.7 .NET. The desktop launcher accepts a Prompt and optional reference images, calls a Responses-compatible model endpoint, builds the generated project, runs structural and interaction checks, captures evaluation images, and launches the selected game.
+The supported desktop workflow targets Windows and Godot 4.7 .NET. The launcher accepts a Prompt and optional reference images, calls a Responses-compatible model endpoint, builds the generated project, runs structural and interaction checks, captures evaluation images, and launches the selected game.
 
 ## Required Software
 
@@ -33,27 +33,21 @@ Do not commit personal absolute paths.
 
 ## Start the Desktop Interface
 
-From the repository root:
-
-~~~powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
-~~~
-
-The default preset uses the Micu Responses-compatible endpoint and <code>gpt-5.6-sol</code>. The launcher asks for the API Key using masked input and passes it only to the child process.
-
-Other endpoints:
+From the repository root, choose a provider and model explicitly:
 
 ~~~powershell
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider openai -Model <model-id>
 powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1 -ApiProvider custom -BaseUrl https://example.com/v1 -Model <model-id>
 ~~~
 
+The launcher asks for the API key using masked input and passes it only to the child process.
+
 ## Security
 
 - Never place an API Key in source code, README examples, command-line arguments, committed environment files, screenshots, or issue text.
 - Prefer the masked launcher. It clears its local key copy after starting the desktop process.
 - Generated projects and evaluation evidence are written below <code>../output/generated/</code> and are ignored by Git.
-- Rotate any key that has been exposed in chat, terminal history, logs, or screen recordings.
+- Rotate any key that may have been disclosed.
 
 ## Development Checks
 
@@ -63,4 +57,4 @@ python -m compileall -q prompt_to_play scripts tests
 ruff check prompt_to_play scripts tests
 ~~~
 
-The runtime does not require Codex CLI, Rust, Node.js, Babylon.js, Bevy, Gemini asset generation, or Tripo3D. Those components belong to upstream or historical experiments rather than the supported direct Godot pipeline.
+The runtime does not require the Codex CLI.

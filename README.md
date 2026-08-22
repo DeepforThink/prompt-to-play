@@ -44,7 +44,7 @@ All three games below were produced by the same pipeline from text-only prompts.
 - **Trusted runtime harness** — the repository owns the entry point, build configuration, structural checks, interaction probes, and screenshot capture.
 - **Automated correction loop** — compiler errors, scene failures, interaction failures, capture failures, and visual issues can all trigger a repair revision.
 - **Best-revision recovery** — immutable candidate snapshots allow the host to restore the strongest playable revision after a regression.
-- **Auditable evidence** — each revision records manifests, hashes, timings, Token usage, logs, screenshots, scores, and selection results.
+- **Auditable evidence** — each revision records manifests, hashes, timings, model-call metadata, logs, screenshots, scores, and selection results.
 - **Persistent output** — closing the game does not delete the generated project.
 - **Provider compatibility** — supports OpenAI Responses-compatible endpoints through a masked local launcher.
 
@@ -137,15 +137,7 @@ $env:PTP_GODOT_EXE = "C:\path\to\Godot_v4.7-stable_mono_win64.exe"
 
 ### Launch the Desktop Interface
 
-The recommended Windows entry point reads the API key through masked input:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_prompt_to_play_api.ps1
-```
-
-The default preset targets the Micu Responses-compatible endpoint with `gpt-5.6-sol`.
-
-Other endpoint presets:
+The Windows launcher reads the API key through masked input. Choose a provider and model through command-line parameters:
 
 ```powershell
 # OpenAI
@@ -164,8 +156,6 @@ The launcher passes the key only through the child process environment and clear
 3. Select **Generate and Launch**.
 4. Follow progress in the run log.
 5. Play the selected project when the quality loop finishes.
-
-Seed is derived internally from the canonical request. Time, Token usage, scores, and output hashes are recorded as evaluation results rather than exposed as required user inputs.
 
 ## Generated Output
 
@@ -193,18 +183,11 @@ Every request creates a unique project directory outside the source repository:
 
 Closing Godot does not remove the project. Open its `project.godot` again to play or edit it without another model call. An API key is required only when generating or repairing a different game.
 
-## Evaluation Evidence
+## Verification and Run Artifacts
 
-| Course metric | Evidence produced by Prompt-to-Play |
-| --- | --- |
-| Scene similarity | Visual comparison between the prompt/references and hashed captures |
-| Structural correctness | Build result plus entry, gameplay, player, objective, HUD, camera, and interaction checks |
-| Automation loop | Initial file package, per-revision patch/evaluation, immutable snapshots, and final selection |
-| Generation speed | Stage-level timing for generation, publication, build, verification, capture, evaluation, repair, and restore |
-| Token efficiency | Per-Agent input/output Token counts and model-call traces |
-| Reproducibility | Canonical request, derived Seed, source/capture hashes, and repeated-run comparison |
+Prompt-to-Play stores the source snapshot and machine-readable evidence for every revision, including build logs, structural and interaction reports, rendered captures, visual feedback, timings, hashes, and the final selection decision. These artifacts make failed runs diagnosable and accepted results traceable.
 
-An attractive screenshot cannot override a failed build or interaction probe. Conversely, a compilable scene cannot pass if it fails visual quality or gameplay-readability requirements.
+A candidate is accepted only when it passes the required build, structure, interaction, capture, and visual gates. A polished screenshot cannot override a broken build or failed interaction probe, and a compilable scene cannot pass if it lacks the requested gameplay or visual readability.
 
 ## Repository Layout
 
@@ -223,24 +206,9 @@ An attractive screenshot cannot override a failed build or interaction probe. Co
 
 Older schema-driven, multi-engine, publishing, and asset-generation modules are retained as upstream or implementation history. They are not used by the supported direct-generation entry point.
 
-## Development
+## Contributing
 
-Run the test and static-analysis suite:
-
-```powershell
-python -m pytest -q
-python -m compileall -q prompt_to_play scripts tests
-ruff check prompt_to_play scripts tests
-```
-
-Before committing:
-
-- keep API keys, `.env` files, personal paths, and private references out of Git;
-- do not commit `output/`, `.godot/`, run artifacts, caches, local toolchains, or build products;
-- keep original recordings outside the repository and add only compressed showcase media;
-- verify that README links, demonstration prompts, and videos remain valid.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing requirements, security guidance, and pull request conventions.
 
 ## Limitations
 

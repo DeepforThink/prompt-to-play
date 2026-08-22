@@ -17,7 +17,7 @@ This repository contains the active Prompt-to-Play direct Godot generation pipel
 - Preserve the trust boundary: repository-owned host files are not model-writable; model changes remain below <code>generated/**</code>.
 - Treat build, structural, interaction, capture, and visual results as evidence. The host, not a model response, owns acceptance.
 - Never commit API keys, environment files, generated output directories, run artifacts, local toolchains, caches, or private reference images.
-- Keep original recordings outside the repository. Only curated, compressed demo media belongs in <code>media/demos/</code>.
+- Keep repository media small and web-friendly. Curated demo assets belong in <code>media/demos/</code>.
 - Run the complete test suite after contract, Agent, pipeline, launcher, or template changes.
 - Preserve upstream attribution and the MIT license.
 

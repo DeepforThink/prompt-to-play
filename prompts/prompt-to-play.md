@@ -110,6 +110,5 @@ delete it and teammates can reopen or edit it without an API key.
 Before delivery, run at least two semantically different prompts through the
 same direct pipeline, rerun one unchanged request to compare reproducibility
 evidence, and exercise one real evaluation-to-code-patch-to-reevaluation
-transition. Report scene similarity, structural correctness, automation-loop
-completeness, generation speed, Token efficiency, and reproducibility as
-measurements rather than user-supplied parameters.
+transition. Preserve the resulting build, interaction, visual, timing,
+model-usage, and reproducibility evidence in the run artifacts.

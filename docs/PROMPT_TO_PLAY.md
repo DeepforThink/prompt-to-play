@@ -133,7 +133,7 @@ inputs.
 Each revision retains the exact generated source snapshot and machine-readable
 evidence. Earlier revisions are never silently overwritten.
 
-| Course metric | Direct-pipeline evidence |
+| Quality dimension | Direct-pipeline evidence |
 | --- | --- |
 | Scene similarity | Visual Agent comparison of prompt/references with hashed capture PNGs |
 | Structural correctness | Build result plus harness entry, gameplay, renderable, and camera checks |

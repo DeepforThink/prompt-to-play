@@ -43,7 +43,7 @@ Changes to the direct-file contract, Agent prompts, evaluation gate, trusted tem
 - Never commit API keys, <code>.env</code> files, personal paths, private reference images, generated projects, or run artifacts.
 - Keep model writes below <code>generated/**</code>; do not expand capabilities without explicit tests and threat analysis.
 - Use the masked launcher for credentials.
-- Add only compressed, curated showcase media to <code>media/demos/</code>; retain original recordings outside Git.
+- Keep showcase media compressed, curated, and suitable for repository browsing.
 - Preserve upstream attribution and the MIT license.
 
 ## Pull Request Scope
