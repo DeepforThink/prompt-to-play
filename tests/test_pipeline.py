@@ -155,7 +155,8 @@ class PipelineStageTests(unittest.TestCase):
                     )
                 )
             state = PipelineState(LaunchRequest.from_values("并行规划的森林遗迹"))
-            stages.plan(state, lambda _message: None)
+            messages = []
+            stages.plan(state, messages.append)
             stages.validate(state, lambda _message: None)
             stages.publish(state, lambda _message: None)
 
@@ -187,6 +188,10 @@ class PipelineStageTests(unittest.TestCase):
             )
             self.assertEqual(trace["schema"], agents.TRACE_SCHEMA)
             self.assertEqual(trace["calls"][0]["role"], "world_planner")
+            self.assertIn(
+                "模型后端：http -> https://api.openai.com/v1",
+                messages,
+            )
             self.assertEqual(
                 {call["task_id"] for call in trace["calls"][1:]},
                 {

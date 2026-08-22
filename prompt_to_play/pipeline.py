@@ -874,6 +874,13 @@ class PipelineStages:
         log(f"请求哈希：{request['request_hash']}")
         log(f"内部派生 seed：{request['seed']}")
         if self._uses_default_planner:
+            provider_mode = self.environment.get(
+                "PROMPT_TO_PLAY_PROVIDER", "http"
+            ).strip()
+            base_url = self.environment.get(
+                "PROMPT_TO_PLAY_BASE_URL", "https://api.openai.com/v1"
+            ).rstrip("/")
+            log(f"模型后端：{provider_mode} -> {base_url}")
             runtime = self.agent_runtime_factory(
                 self.source_repo_root,
                 self.environment,

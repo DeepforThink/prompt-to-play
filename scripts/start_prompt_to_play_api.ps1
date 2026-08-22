@@ -123,11 +123,24 @@ try {
         }
     }
 
-    $process = Start-Process `
-        -FilePath $PythonExecutable `
-        -ArgumentList @("-m", "prompt_to_play.pipeline") `
-        -WorkingDirectory $repoRoot `
-        -PassThru
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $PythonExecutable
+    $startInfo.Arguments = '-m prompt_to_play.pipeline'
+    $startInfo.WorkingDirectory = $repoRoot
+    $startInfo.UseShellExecute = $false
+    foreach ($environmentName in $managedEnvironmentNames) {
+        $value = [Environment]::GetEnvironmentVariable($environmentName, "Process")
+        if ($null -eq $value) {
+            $startInfo.EnvironmentVariables.Remove($environmentName)
+        }
+        else {
+            $startInfo.EnvironmentVariables[$environmentName] = $value
+        }
+    }
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw "Failed to start Prompt-to-Play."
+    }
     Write-Host "Prompt-to-Play started (PID $($process.Id))."
 }
 finally {
