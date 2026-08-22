@@ -950,11 +950,11 @@ class PipelineStageTests(unittest.TestCase):
             )
             evaluations = state.require_result(pipeline.EVALUATIONS_RESULT)
             self.assertEqual(
-                [item["iteration"] for item in evaluations], [0, 1, 2]
+                [item["iteration"] for item in evaluations], [0, 1]
             )
             self.assertEqual(
                 [item["status"] for item in evaluations],
-                ["fail", "fail", "fail"],
+                ["fail", "fail"],
             )
             self.assertEqual(evaluations[1]["metrics"]["reproducibility"], 0.5)
             delivery = json.loads(
@@ -993,7 +993,13 @@ class PipelineStageTests(unittest.TestCase):
                 evaluation_error["error_type"], "VisualFeedbackContractError"
             )
             self.assertEqual(
+                evaluation_error["measurement_status"], "not_measured"
+            )
+            self.assertEqual(
                 delivery["visual_evaluation_error"], evaluation_error
+            )
+            self.assertFalse(
+                (evaluation_error_path.with_name("evaluation.json")).exists()
             )
             self.assertFalse(
                 (

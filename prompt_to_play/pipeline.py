@@ -349,6 +349,7 @@ def _build_evaluation_report(
     world: Mapping[str, Any],
     structural_report: Mapping[str, Any],
     visual_feedback: Mapping[str, Any],
+    visual_measured: bool,
     screenshot_paths: Sequence[str],
     timing_ms: Mapping[str, int],
     usage: Any,
@@ -388,7 +389,14 @@ def _build_evaluation_report(
             "message": (
                 "Rendered evaluation views satisfy the prompt similarity gate."
                 if visual_passed
-                else "Rendered evaluation views require another visual correction."
+                else (
+                    "Rendered evaluation views require another visual correction."
+                    if visual_measured
+                    else (
+                        "Visual evaluation did not complete; score 0.0 is a "
+                        "conservative delivery sentinel, not a measured similarity."
+                    )
+                )
             ),
             "evidence": list(screenshot_paths),
         }
@@ -1581,6 +1589,7 @@ class PipelineStages:
                     "revision": revision,
                     "status": "rejected" if contract_rejected else "failed",
                     "error_type": type(exc).__name__,
+                    "measurement_status": "not_measured",
                     "screenshots": list(screenshot_relatives),
                 }
                 (revision_dir / "visual_evaluation_error.json").write_bytes(
@@ -1603,6 +1612,25 @@ class PipelineStages:
             finally:
                 _timings(state)["evaluate"] += _elapsed_ms(evaluate_started)
 
+            if evaluation_failed and evaluations:
+                if visual_evaluation_error["status"] == "rejected":
+                    failure_summary = "输出未通过宿主契约"
+                else:
+                    failure_summary = "Provider 调用未完成"
+                log(
+                    f"VisualEvaluationAgent：修订 {revision} {failure_summary}；"
+                    "该修订不计分，保留已完成评估的修订并停止迭代"
+                )
+                runtime.write_trace(
+                    project_dir
+                    / "artifacts"
+                    / "runs"
+                    / run_id
+                    / "agent_trace.json",
+                    run_id=run_id,
+                )
+                break
+
             if not evaluation_failed:
                 feedback_path = revision_dir / "visual_feedback.json"
                 feedback_path.write_bytes(
@@ -1615,6 +1643,7 @@ class PipelineStages:
                 world=world,
                 structural_report=structural,
                 visual_feedback=feedback,
+                visual_measured=not evaluation_failed,
                 screenshot_paths=screenshot_relatives,
                 timing_ms=_timings(state),
                 usage=usage,
