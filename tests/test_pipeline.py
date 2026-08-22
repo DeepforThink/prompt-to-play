@@ -82,14 +82,18 @@ class PipelineStageTests(unittest.TestCase):
             target = state.require_result(pipeline.PROJECT_RESULT)
             self.assertEqual(
                 target.parent,
-                output_root / request_document["request_hash"][:12],
+                (output_root / request_document["request_hash"][:12]).resolve(
+                    strict=False
+                ),
             )
             self.assertRegex(target.name, r"^run-[0-9a-f]{12}$")
             self.assertEqual(captured["prompt"], request.prompt)
             self.assertEqual(
                 captured["reference_image_paths"], request.reference_images
             )
-            self.assertEqual(captured["project_root"], source_repo)
+            self.assertEqual(
+                captured["project_root"], source_repo.resolve(strict=False)
+            )
             self.assertRegex(
                 binding.project_path,
                 r"^references/00_[0-9a-f]{16}\.png$",
@@ -146,7 +150,9 @@ class PipelineStageTests(unittest.TestCase):
             expected_target = state.require_result(pipeline.PROJECT_RESULT)
             self.assertEqual(
                 expected_target.parent,
-                output_root / request_document["request_hash"][:12],
+                (output_root / request_document["request_hash"][:12]).resolve(
+                    strict=False
+                ),
             )
             self.assertEqual(published_targets, [expected_target])
             world = json.loads(
