@@ -27,6 +27,7 @@ try:  # Support package imports and direct local execution.
     from . import (
         agents,
         assets,
+        code_objects,
         contracts,
         evaluator,
         lifecycle,
@@ -38,6 +39,7 @@ try:  # Support package imports and direct local execution.
 except ImportError:  # pragma: no cover - direct script execution only
     import agents
     import assets
+    import code_objects
     import contracts
     import evaluator
     import lifecycle
@@ -65,6 +67,7 @@ REFINEMENT_RESULT = "refinement"
 EVALUATIONS_RESULT = "evaluations"
 SELECTED_REVISION_RESULT = "selected_revision"
 DELIVERY_RESULT = "delivery"
+CODE_OBJECT_RESULT = "code_objects"
 TIMING_RESULT = "timing_ms"
 
 DELIVERY_SCHEMA = "prompt-to-play/delivery@1"
@@ -1160,7 +1163,22 @@ class PipelineStages:
             )
         runtime = state.results.get(AGENT_RUNTIME_RESULT)
         if isinstance(runtime, agents.MultiAgentRuntime):
+            code_result = code_objects.generate_code_objects(
+                runtime,
+                state.request.prompt,
+                world,
+                project_dir,
+                environment=self.environment,
+            )
+            state.set_result(CODE_OBJECT_RESULT, code_result)
+            (request_path.parent / "code_objects.json").write_bytes(
+                contracts.canonical_json_bytes(code_result.record) + b"\n"
+            )
             runtime.write_trace(request_path.parent / "agent_trace.json", run_id=run_id)
+            log(
+                "CodeObjectAgent："
+                f"{code_result.status}，生成物体代码 {len(code_result.entity_ids)} 个"
+            )
 
         asset_started = time.perf_counter()
         asset_result = self.orchestrate_assets(
@@ -1479,7 +1497,7 @@ class PipelineStages:
         build_environment["NUGET_FALLBACK_PACKAGES"] = os.fspath(
             toolchain.godot_nupkgs
         )
-        for command in (
+        for index, command in enumerate((
             (
                 os.fspath(toolchain.dotnet_exe),
                 "restore",
@@ -1488,8 +1506,32 @@ class PipelineStages:
                 "--ignore-failed-sources",
             ),
             (os.fspath(toolchain.dotnet_exe), "build", "--no-restore"),
-        ):
-            self.run_command(command, project_dir, build_environment, log)
+        )):
+            try:
+                self.run_command(command, project_dir, build_environment, log)
+            except PipelineIntegrationError:
+                code_result = state.results.get(CODE_OBJECT_RESULT)
+                if (
+                    index != 1
+                    or not isinstance(code_result, code_objects.CodeObjectResult)
+                    or code_result.status != "generated"
+                ):
+                    raise
+                code_result.source_path.write_text(
+                    code_objects.default_source(), encoding="utf-8", newline="\n"
+                )
+                fallback_record = dict(code_result.record)
+                fallback_record["status"] = "compile_fallback"
+                fallback_record["entity_ids"] = []
+                fallback_result = code_objects.CodeObjectResult(
+                    "compile_fallback", (), code_result.source_path, fallback_record
+                )
+                state.set_result(CODE_OBJECT_RESULT, fallback_result)
+                (project_dir / "artifacts" / "runs" / run_id / "code_objects.json").write_bytes(
+                    contracts.canonical_json_bytes(fallback_record) + b"\n"
+                )
+                log("CodeObjectAgent：生成代码编译失败，已回退内置物体并重试构建")
+                self.run_command(command, project_dir, build_environment, log)
         _timings(state)["build"] += _elapsed_ms(build_started)
 
         runtime = state.results.get(AGENT_RUNTIME_RESULT)

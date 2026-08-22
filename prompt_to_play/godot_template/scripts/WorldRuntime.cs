@@ -652,6 +652,25 @@ public partial class WorldRuntime : Node3D
         root.SetMeta("prefab", prefab);
         RegisterStable(root, stableId, kind, seed, position);
 
+        if (GeneratedCodeObjects.TryBuild(
+                stableId,
+                prefab,
+                root,
+                scale,
+                seed,
+                _primaryColor,
+                _accentColor,
+                _emissiveColor,
+                out string codeFailure))
+        {
+            root.SetMeta("asset_resolution", "llm_code");
+            return;
+        }
+        if (!string.IsNullOrEmpty(codeFailure))
+        {
+            root.SetMeta("code_generation_error", codeFailure);
+        }
+
         if (_prefabResolver.TryInstantiate(
                 prefab,
                 root,
@@ -975,7 +994,21 @@ public partial class WorldRuntime : Node3D
                 CollisionLayer = 2,
                 CollisionMask = 1,
             };
-            if (!_prefabResolver.TryInstantiate(
+            bool codeGenerated = GeneratedCodeObjects.TryBuild(
+                spec.Id,
+                spec.Prefab,
+                interactable,
+                Vector3.One,
+                seed,
+                _primaryColor,
+                _accentColor,
+                _emissiveColor,
+                out string codeFailure);
+            if (codeGenerated)
+            {
+                interactable.SetMeta("asset_resolution", "llm_code");
+            }
+            else if (!_prefabResolver.TryInstantiate(
                     spec.Prefab,
                     interactable,
                     Vector3.One,
@@ -991,6 +1024,10 @@ public partial class WorldRuntime : Node3D
                     Vector3.Zero,
                     0.65f,
                     material);
+            }
+            if (!string.IsNullOrEmpty(codeFailure))
+            {
+                interactable.SetMeta("code_generation_error", codeFailure);
             }
             interactable.AddChild(new CollisionShape3D
             {

@@ -240,6 +240,7 @@ class PipelineStageTests(unittest.TestCase):
                     "refine_01_layout",
                     "refine_01_gameplay",
                     "refine_01_lighting_camera",
+                    "code_objects_01",
                 },
             )
 

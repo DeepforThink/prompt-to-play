@@ -31,6 +31,7 @@ class AgentRole(str, Enum):
     WORLD_REFINER = "world_refiner"
     VISUAL_EVALUATOR = "visual_evaluator"
     REPAIR = "repair"
+    CODE_OBJECT = "code_object"
 
 
 ROLE_MODEL_ENV: Mapping[AgentRole, str] = {
@@ -38,6 +39,7 @@ ROLE_MODEL_ENV: Mapping[AgentRole, str] = {
     AgentRole.WORLD_REFINER: "PROMPT_TO_PLAY_REFINER_MODEL",
     AgentRole.VISUAL_EVALUATOR: "PROMPT_TO_PLAY_EVALUATOR_MODEL",
     AgentRole.REPAIR: "PROMPT_TO_PLAY_REPAIR_MODEL",
+    AgentRole.CODE_OBJECT: "PROMPT_TO_PLAY_CODE_OBJECT_MODEL",
 }
 
 

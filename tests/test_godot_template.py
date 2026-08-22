@@ -12,6 +12,9 @@ class GodotTemplateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.runtime = (SCRIPTS / "WorldRuntime.cs").read_text(encoding="utf-8")
+        cls.generated_objects = (SCRIPTS / "GeneratedCodeObjects.cs").read_text(
+            encoding="utf-8"
+        )
         cls.spec = (SCRIPTS / "WorldSpec.cs").read_text(encoding="utf-8")
         cls.artifacts = (SCRIPTS / "ArtifactWriter.cs").read_text(encoding="utf-8")
         cls.asset_catalog = (SCRIPTS / "AssetCatalog.cs").read_text(encoding="utf-8")
@@ -89,6 +92,14 @@ class GodotTemplateTests(unittest.TestCase):
         primitive_branch = self.runtime.index('token.Contains("tree")', resolver_call)
         self.assertLess(resolver_call, primitive_branch)
         self.assertIn('_primitiveFallbackIds.Add(stableId)', self.runtime)
+
+    def test_runtime_prefers_llm_generated_object_code_with_fallback(self):
+        self.assertIn("GeneratedCodeObjects.TryBuild(", self.runtime)
+        self.assertLess(
+            self.runtime.index("GeneratedCodeObjects.TryBuild("),
+            self.runtime.index("_prefabResolver.TryInstantiate("),
+        )
+        self.assertIn("return false;", self.generated_objects)
 
     def test_interactables_try_catalog_assets_before_glow_primitive(self):
         start = self.runtime.index("private void BuildInteractables()")

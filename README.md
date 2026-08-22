@@ -16,6 +16,7 @@ The floating mechanical city in `prompt_to_play/examples/` is only one acceptanc
 - WASD and mouse exploration, Space to jump, E to interact, contextual prompts, objective progress, and completion feedback.
 - Machine-readable build and structural evidence for `scene_loads`, `world_graph_connected`, `objectives_completable`, and `completion_reachable`.
 - An implemented screenshot feedback loop: VisualEvaluationAgent returns validated entity/field-level guidance, the host routes it to isolated layout, gameplay, and lighting/camera Repair Subagents, merges only owned stable-ID updates, and performs at most two correction rounds before selecting the best revision.
+- A CodeObjectAgent that writes prompt-specific Godot C# geometry and collision code for buildings, props, and interactables. The generated code runs before catalog assets or primitive fallbacks; unsafe output is rejected, and compile failures automatically restore the built-in implementation.
 - A cross-platform publisher and Python CI matrix for Windows and Linux.
 
 The host Agent performs prompt/reference interpretation and visual judgement. The repository supplies its runtime protocol, deterministic execution layer, contracts, evidence format, and correction guardrails. The scope is prompt-conditioned explorable 3D worlds, not arbitrary game genres or photorealistic reconstruction.
@@ -158,6 +159,7 @@ CPU-only execution is sufficient for contract validation, compilation, headless 
 - `prompt_to_play/refinement.py` — fixed refinement DAG, ownership enforcement, convergence, and iteration records.
 - `prompt_to_play/assets.py` — AssetAgent requests, paid API opt-in, content-addressed GLB cache, catalog, and manifest.
 - `prompt_to_play/evaluator.py` — VisualEvaluationAgent guidance contracts, bounded Repair worker, and deterministic WorldSpec-to-PatchSpec diff.
+- `prompt_to_play/code_objects.py` — bounded LLM-to-Godot-C# generation, source validation, evidence, and compile fallback.
 - `prompt_to_play/repair.py` — fixed Repair Subagent fan-out, ownership validation, deterministic merge, and round evidence.
 - `prompt_to_play/launcher.py` — responsive Tk desktop UI and stage runner.
 - `prompt_to_play/pipeline.py` — concrete planning, publishing, build, structural-check, and launch stages.
